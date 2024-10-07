@@ -24,13 +24,13 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 
-from ...image_processing_utils import BaseImageProcessor, BatchFeature
-from ...image_transforms import (
+from transformers.image_processing_utils import BaseImageProcessor, BatchFeature #HF
+from transformers.image_transforms import ( #HF, TODO: double check
     convert_to_rgb,
     resize,
     to_channel_dimension_format,
 )
-from ...image_utils import (
+from transformers.image_utils import (
     OPENAI_CLIP_MEAN,
     OPENAI_CLIP_STD,
     ChannelDimension,
@@ -46,14 +46,14 @@ from ...image_utils import (
     valid_images,
     validate_preprocess_arguments,
 )
-from ...utils import TensorType, is_vision_available, logging
+from transformers.utils import TensorType, logging #is_vision_available,
 
 
 logger = logging.get_logger(__name__)
 
 
-if is_vision_available():
-    from PIL import Image
+# if is_vision_available():
+from PIL import Image
 
 
 def make_batched_images(images) -> List[List[ImageInput]]:

@@ -33,30 +33,35 @@ from mindspore.nn import CrossEntropyLoss, LayerNorm
 # from torch.nn import CrossEntropyLoss, LayerNorm
 
 # implemented in mindone
-from mindone.transformers.activations import ACT2FN
-# from ...cache_utils import Cache, StaticCache #TODO: https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/cache_utils.py#L26
-class Cache:
-    pass
-class StaticCache(Cache): #https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/cache_utils.py#L1034
-    pass
-# from ...generation import GenerationMixin #TODO:https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/generation/utils.py#L328
-class GenerationMixin:
-    pass
+# from mindone.transformers.activations import ACT2FN
+from ...activations import ACT2FN
+from mindnlp.transformers.cache_utils import Cache, StaticCache #TODO involve torch: https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/cache_utils.py#L26
+# class Cache:
+#     pass
+# class StaticCache(Cache): #https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/cache_utils.py#L1034
+#     pass
+from mindnlp.transformers.generation import GenerationMixin #TODO involve torch judgement:https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/generation/utils.py#L328
+# class GenerationMixin:
+#     pass
 
-from mindone.transformers.modeling_attn_mask_utils import (
+# from mindone.transformers.modeling_attn_mask_utils import (
+#     AttentionMaskConverter,
+# )
+from ...modeling_attn_mask_utils import (
     AttentionMaskConverter,
 )
-from mindone.transformers.modeling_outputs import (
+from ...modeling_outputs import (
     BaseModelOutputWithPast,
     ModelOutput,
 )
-from mindnlp.transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS # implemented in mindnlp => TODO: clone one # https://github.com/huggingface/transformers/blob/2bd4d5897dc73e8b172832070a6f9e567a0df017/src/transformers/modeling_rope_utils.py#L353
-# install lastest version 0.4.0
+from .modeling_rope_utils import ROPE_INIT_FUNCTIONS #HF
+# from mindnlp.transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS # implemented in mindnlp => clone one # https://github.com/huggingface/transformers/blob/2bd4d5897dc73e8b172832070a6f9e567a0df017/src/transformers/modeling_rope_utils.py#L353
+# or install lastest version 0.4.0
 
 # from ...modeling_utils import PreTrainedModel
-from mindone.transformers import MSPreTrainedModel # implemented in mindone
+from ...modeling_utils import MSPreTrainedModel # implemented in mindone
 
-from mindone.transformers.utils import (
+from transformers.utils import ( #HF
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
     is_flash_attn_2_available,
@@ -70,10 +75,11 @@ from .configuration_qwen2_vl import Qwen2VLConfig, Qwen2VLVisionConfig
 if is_flash_attn_2_available():
     from flash_attn import flash_attn_varlen_func
 
-    from ...modeling_flash_attention_utils import _flash_attention_forward #TODO
+    from transformers.modeling_flash_attention_utils import _flash_attention_forward #TODO
 else:
     flash_attn_varlen_func = None
 
+from mindspore.common.initializer import initializer, Normal
 
 logger = logging.get_logger(__name__)
 
@@ -181,8 +187,8 @@ class Qwen2VLRotaryEmbedding(nn.Cell):
         self.config = config
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, **self.rope_kwargs)
-        self.register_buffer("inv_freq", inv_freq, persistent=False) #TODO
+        self.inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, **self.rope_kwargs)
+        # self.register_buffer("inv_freq", inv_freq, persistent=False) #TODO
         self.original_inv_freq = self.inv_freq
 
     def _dynamic_frequency_update(self, position_ids, device):
@@ -193,14 +199,15 @@ class Qwen2VLRotaryEmbedding(nn.Cell):
         """
         seq_len = ops.max(position_ids) + 1
         if seq_len > self.max_seq_len_cached:  # growth
-            inv_freq, self.attention_scaling = self.rope_init_fn(
+            self.inv_freq, self.attention_scaling = self.rope_init_fn(
                 self.config, device, seq_len=seq_len, **self.rope_kwargs
             )
-            self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
+            # self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
             self.max_seq_len_cached = seq_len
 
         if seq_len < self.original_max_seq_len and self.max_seq_len_cached > self.original_max_seq_len:  # reset
-            self.register_buffer("inv_freq", self.original_inv_freq, persistent=False)
+            # self.register_buffer("inv_freq", self.original_inv_freq, persistent=False)
+            self.inv_freq = self.original_inv_freq
             self.max_seq_len_cached = self.original_max_seq_len
 
     # @torch.no_grad()
@@ -297,8 +304,8 @@ def apply_rotary_pos_emb_vision(tensor: ms.Tensor, freqs: ms.Tensor) -> ms.Tenso
 class VisionRotaryEmbedding(nn.Cell):
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
-        inv_freq = 1.0 / (theta ** (ops.arange(0, dim, 2, dtype=ms.float) / dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.inv_freq = 1.0 / (theta ** (ops.arange(0, dim, 2, dtype=ms.float32) / dim))
+        # self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def construct(self, seqlen: int) -> ms.Tensor:
         seq = ops.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
@@ -320,7 +327,7 @@ class PatchEmbed(nn.Cell):
         self.in_channels = in_channels
         self.embed_dim = embed_dim
 
-        kernel_size = [temporal_patch_size, patch_size, patch_size]
+        kernel_size = (temporal_patch_size, patch_size, patch_size) # For 'Conv3d', the type of 'kernel_size' should be one of '['int', 'tuple']'
         self.proj = nn.Conv3d(in_channels, embed_dim, kernel_size=kernel_size, stride=kernel_size, has_bias=False)
 
     def construct(self, hidden_states: ms.Tensor) -> ms.Tensor:
@@ -336,7 +343,7 @@ class PatchMerger(nn.Cell):
     def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2) -> None:
         super().__init__()
         self.hidden_size = context_dim * (spatial_merge_size**2)
-        self.ln_q = LayerNorm(context_dim, epsilon=1e-6)
+        self.ln_q = LayerNorm([context_dim], epsilon=1e-6)
         self.mlp = nn.SequentialCell(
             nn.Dense(self.hidden_size, self.hidden_size),
             nn.GELU(),
@@ -483,8 +490,8 @@ QWEN2_VL_VISION_ATTENTION_CLASSES = {
 class Qwen2VLVisionBlock(nn.Cell):
     def __init__(self, config, attn_implementation: str = "sdpa") -> None:
         super().__init__()
-        self.norm1 = LayerNorm(config.embed_dim, eps=1e-6)
-        self.norm2 = LayerNorm(config.embed_dim, eps=1e-6)
+        self.norm1 = LayerNorm([config.embed_dim], epsilon=1e-6)
+        self.norm2 = LayerNorm([config.embed_dim], epsilon=1e-6)
         mlp_hidden_dim = int(config.embed_dim * config.mlp_ratio)
 
         self.attn = QWEN2_VL_VISION_ATTENTION_CLASSES[attn_implementation](
@@ -561,7 +568,7 @@ class Qwen2RMSNorm(nn.Cell):
         Qwen2RMSNorm is equivalent to T5LayerNorm
         """
         super().__init__()
-        self.weight = nn.Parameter(ops.ones(hidden_size))
+        self.weight = ms.Parameter(ops.ones(hidden_size))
         self.variance_epsilon = eps
 
     def construct(self, hidden_states):
@@ -910,7 +917,7 @@ class Qwen2VLSdpaAttention(Qwen2VLAttention):
                 "Qwen2VLModel is using Qwen2VLSdpaAttention, but `torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to the manual attention implementation, "
                 'but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
             )
-            return super().forward(
+            return super().construct(
                 hidden_states=hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -1119,15 +1126,16 @@ class Qwen2VLPreTrainedModel(MSPreTrainedModel):
     _supports_static_cache = True
 
     def _init_weights(self, module):
-        std = self.config.initializer_range
-        if isinstance(module, (nn.Dense, nn.Conv3d)):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
+        pass
+        # std = self.config.initializer_range
+        # if isinstance(module, (nn.Dense, nn.Conv3d)):
+        #     module.weight.data.normal_(mean=0.0, std=std)
+        #     if module.bias is not None:
+        #         module.bias.data.zero_()
+        # elif isinstance(module, nn.Embedding):
+        #     module.weight.data.normal_(mean=0.0, std=std)
+        #     if module.padding_idx is not None:
+        #         module.weight.data[module.padding_idx].zero_()
 
 
 class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel):
@@ -1215,7 +1223,10 @@ class Qwen2VLModel(Qwen2VLPreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        # Note!!!! parameters and order are different from Pytorch!
+        # TODO TBD: embedding_table = Normal(0.0, std=config.initializer_range)
+        # self.embed_tokens = nn.Embedding(vocab_size=config.vocab_size, embedding_size=config.hidden_size, embedding_table = Normal(0.0, std=config.initializer_range), padding_idx=self.padding_idx)
+        self.embed_tokens = nn.Embedding(vocab_size=config.vocab_size, embedding_size=config.hidden_size, padding_idx=self.padding_idx)
         self.layers = nn.CellList(
             [Qwen2VLDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
@@ -1238,13 +1249,13 @@ class Qwen2VLModel(Qwen2VLPreTrainedModel):
         input_ids: ms.Tensor = None,
         attention_mask: Optional[ms.Tensor] = None,
         position_ids: Optional[ms.Tensor] = None,
-        past_key_values: Optional[List[ms.FloatTensor]] = None,
-        inputs_embeds: Optional[ms.FloatTensor] = None,
+        past_key_values: Optional[List[ms.Tensor]] = None,
+        inputs_embeds: Optional[ms.Tensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        cache_position: Optional[ms.LongTensor] = None,
+        cache_position: Optional[ms.Tensor] = None, # Long
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1573,7 +1584,7 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
                 - 0 for tokens that are **masked**.
 
         Returns:
-            position_ids (`torch.LongTensor` of shape `(3, batch_size, sequence_length)`)
+            position_ids (`ms.Tensor` of shape `(3, batch_size, sequence_length)`)
             mrope_position_deltas (`torch.Tensor` of shape `(batch_size)`)
         """
         spatial_merge_size = self.config.vision_config.spatial_merge_size
@@ -1693,7 +1704,7 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
 
     @add_start_docstrings_to_model_forward(QWEN2_VL_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=Qwen2VLCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
-    def forward(
+    def construct(
         self,
         input_ids: ms.Tensor = None, #Long
         attention_mask: Optional[ms.Tensor] = None,

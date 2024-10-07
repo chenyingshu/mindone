@@ -23,11 +23,18 @@ Processor class for Qwen2-VL.
 
 from typing import List, Union
 
-from ...feature_extraction_utils import BatchFeature
-from ...image_utils import ImageInput, VideoInput
-from ...processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
-from ...tokenization_utils_base import PreTokenizedInput, TextInput
-from ...utils import logging
+from transformers.feature_extraction_utils import BatchFeature #HF
+from transformers.image_utils import ImageInput, VideoInput #HF
+from transformers.processing_utils import ProcessingKwargs, ProcessorMixin #, Unpack #HF, TODO Mixin?
+import sys
+if sys.version_info >= (3, 11):
+    import typing
+    Unpack = typing.Unpack
+else:
+    import typing_extensions
+    Unpack = typing_extensions.Unpack
+from transformers.tokenization_utils_base import PreTokenizedInput, TextInput #HF
+from transformers.utils import logging #HF
 
 
 logger = logging.get_logger(__name__)
