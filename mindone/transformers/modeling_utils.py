@@ -61,6 +61,8 @@ if is_safetensors_available():
     from mindone.safetensors.mindspore import load_file as safe_load_file
     from mindone.safetensors.mindspore import save_file as safe_save_file
 
+from transformers import GenerationConfig #Qwen2-VL use
+
 logger = logging.get_logger(__name__)
 
 _init_weights = True
@@ -599,7 +601,8 @@ class MSPreTrainedModel(nn.Cell, ModuleUtilsMixin, PushToHubMixin, PeftAdapterMi
         self.config = config
         self.name_or_path = config.name_or_path
         self.warnings_issued = {}
-        self.generation_config = None
+        # self.generation_config = None        
+        self.generation_config = GenerationConfig.from_model_config(config) if self.can_generate() else None #Qwen2-VL use
         # Overwrite the class attribute to make it an instance attribute, so models like
         # `InstructBlipForConditionalGeneration` can dynamically update it without modifying the class attribute
         # when a different component (e.g. language_model) is used.
@@ -2052,3 +2055,21 @@ class MSPreTrainedModel(nn.Cell, ModuleUtilsMixin, PushToHubMixin, PeftAdapterMi
             config._attn_implementation = "eager"
 
         return config
+
+    # Qwen2-VL use
+    @classmethod
+    def can_generate(cls) -> bool: #TODO: to reconsider the logic
+        """
+        Returns whether this model can generate sequences with `.generate()`.
+
+        Returns:
+            `bool`: Whether this model can generate sequences with `.generate()`.
+        """
+        # Detects whether `prepare_inputs_for_generation` has been overwritten, which is a requirement for generation.
+        # Alternativelly, the model can also have a custom `generate` function.
+        
+        if hasattr(cls, 'prepare_inputs_for_generation') and hasattr(cls, 'generate'):
+            if "GenerationMixin" in str(cls.prepare_inputs_for_generation) and "GenerationMixin" in str(cls.generate):
+                return False
+        return True
+    

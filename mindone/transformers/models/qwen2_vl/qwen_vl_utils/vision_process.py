@@ -15,6 +15,7 @@ from io import BytesIO
 import requests
 from packaging import version
 from PIL import Image
+import numpy as np
 
 # import torch => mindspore
 # import torchvision =>? dataset.vision
@@ -169,7 +170,7 @@ def smart_nframes(
 # Comment: _read_video_torchvision to _read_video_mindspore
 def _read_video_mindspore(
     ele: dict,
-) -> mindspore.Tensor:
+):
     """read video using mindspore.dataset.vision.read_video
 
     Args:
@@ -179,7 +180,7 @@ def _read_video_mindspore(
             - video_start: the start time of video.
             - video_end: the end time of video.
     Returns:
-        mindspore.Tensor: the video tensor with shape (T, C, H, W).
+        numpy array: the video tensor with shape (T, C, H, W).
     """
     video_path = ele["video"]
 
@@ -197,12 +198,13 @@ def _read_video_mindspore(
         end_pts=ele.get("video_end", None),
         pts_unit="sec",
     )
-    # video in [T, H, W, C], audio in [C, L], info is dict{"video_fps", "audio_fps"}
-    video = video.permute(0, 3, 1, 2) # [T, H, W, C] to [T, C, H, W]
-    total_frames, video_fps = video.size(0), info["video_fps"]
+    # video in [T, H, W, C] numpy, audio in [C, L], info is dict{"video_fps", "audio_fps"}
+    # video = video.transpose(0, 3, 1, 2) # [T, H, W, C] to [T, C, H, W]
+    total_frames, video_fps = video.shape[0], info["video_fps"]
     logger.info(f"mindspore vision:  {video_path=}, {total_frames=}, {video_fps=}, time={time.time() - st:.3f}s")
+    print(f"mindspore vision:  {video_path=}, {total_frames=}, {video_fps=}, time={time.time() - st:.3f}s")
     nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
-    idx = ops.linspace(0, total_frames - 1, nframes).round().long()
+    idx = np.linspace(0, total_frames - 1, nframes).round().astype(np.int32)
     video = video[idx]
     return video
 
@@ -215,7 +217,7 @@ def is_decord_available() -> bool:
 # Comment: torch => mindspore
 def _read_video_decord(
     ele: dict,
-) -> mindspore.Tensor:
+):
     """read video using decord.VideoReader
 
     Args:
@@ -225,7 +227,7 @@ def _read_video_decord(
             - video_start: the start time of video.
             - video_end: the end time of video.
     Returns:
-        mindspore.Tensor: the video tensor with shape (T, C, H, W).
+        numpy array: the video tensor with shape (T, C, H, W).
     """
     import decord
     video_path = ele["video"]
@@ -239,7 +241,7 @@ def _read_video_decord(
     nframes = smart_nframes(ele, total_frames=total_frames, video_fps=video_fps)
     idx = ops.linspace(0, total_frames - 1, nframes).round().long().tolist()
     video = vr.get_batch(idx).asnumpy()
-    video = mindspore.Tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
+    # video = mindspore.Tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
     return video
 
 # Comment: torchvision => mindspore
@@ -263,11 +265,11 @@ def get_video_reader_backend() -> str:
     return video_reader_backend
 
 # Comment: torch => mindspore
-def fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR) -> mindspore.Tensor | list[Image.Image]:
+def fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR) -> list[Image.Image]: #|mindspore.Tensor  
     if isinstance(ele["video"], str):
         video_reader_backend = get_video_reader_backend()
         video = VIDEO_READER_BACKENDS[video_reader_backend](ele)
-        nframes, _, height, width = video.shape
+        nframes, height, width, _, = video.shape
 
         min_pixels = ele.get("min_pixels", VIDEO_MIN_PIXELS)
         total_pixels = ele.get("total_pixels", VIDEO_TOTAL_PIXELS)
@@ -287,17 +289,26 @@ def fetch_video(ele: dict, image_factor: int = IMAGE_FACTOR) -> mindspore.Tensor
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
             )
-        video = vision.Resize(
-            size=[resized_height, resized_width],
-            interpolation=Inter.BICUBIC,
-        )(video).float()
-        
+        print("video.shape", video.shape)
+        print("resize.size", resized_height, resized_width)
+        # resize_op = vision.Resize(size=[resized_height, resized_width], interpolation=Inter.BICUBIC).device("Ascend")  # use Ascend for accelaration
         # video = vision.Resize(
         #     size=[resized_height, resized_width],
         #     interpolation=Inter.BICUBIC,
-        # ).device("Ascend")(video).float() # use Ascend for accelaration
+        # )(video).float()
+        # video = ops.ResizeBicubic()(video, size=[resized_height, resized_width])
+        # return video
 
-        return video
+        images = [
+            vision.Resize(
+                size=[resized_height, resized_width],
+                interpolation=Inter.BICUBIC,
+            )(image).astype(np.uint8)
+            for image in video
+        ]
+        images = [Image.fromarray(image) for image in images]
+
+        return images
     else:
         assert isinstance(ele["video"], (list, tuple))
         process_info = ele.copy()

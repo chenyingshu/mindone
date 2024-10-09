@@ -152,7 +152,6 @@ class Qwen2VLRotaryEmbedding(nn.Cell):
         dim=None,
         max_position_embeddings=2048,
         base=10000,
-        device=None,
         scaling_factor=1.0,
         rope_type="default",
         config: Optional[Qwen2VLConfig] = None,
@@ -187,11 +186,11 @@ class Qwen2VLRotaryEmbedding(nn.Cell):
         self.config = config
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
-        self.inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device, **self.rope_kwargs)
+        self.inv_freq, self.attention_scaling = self.rope_init_fn(self.config, **self.rope_kwargs)
         # self.register_buffer("inv_freq", inv_freq, persistent=False) #TODO
         self.original_inv_freq = self.inv_freq
 
-    def _dynamic_frequency_update(self, position_ids, device):
+    def _dynamic_frequency_update(self, position_ids):
         """
         dynamic RoPE layers should recompute `inv_freq` in the following situations:
         1 - growing beyond the cached sequence length (allow scaling)
@@ -200,7 +199,7 @@ class Qwen2VLRotaryEmbedding(nn.Cell):
         seq_len = ops.max(position_ids) + 1
         if seq_len > self.max_seq_len_cached:  # growth
             self.inv_freq, self.attention_scaling = self.rope_init_fn(
-                self.config, device, seq_len=seq_len, **self.rope_kwargs
+                self.config, seq_len=seq_len, **self.rope_kwargs
             )
             # self.register_buffer("inv_freq", inv_freq, persistent=False)  # TODO joao: may break with compilation
             self.max_seq_len_cached = seq_len
@@ -213,14 +212,14 @@ class Qwen2VLRotaryEmbedding(nn.Cell):
     # @torch.no_grad()
     def construct(self, x, position_ids):
         if "dynamic" in self.rope_type:
-            self._dynamic_frequency_update(position_ids, device=x.device)
+            self._dynamic_frequency_update(position_ids)
 
         # Core RoPE block. In contrast to other models, Qwen2_VL has different position ids for thw grids
         # So we expand the inv_freq to shape (3, ...)
         inv_freq_expanded = self.inv_freq[None, None, :, None].float().broadcast_to((3, position_ids.shape[1], -1, 1))
         position_ids_expanded = position_ids[:, :, None, :].float()  # shape (3, bs, 1, positions)
         # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-        device_type = x.device.type
+        # device_type = x.device.type
         # device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
         # with torch.autocast(device_type=device_type, enabled=False):
         # TODO? disable autocast type
@@ -277,10 +276,10 @@ def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim
         `tuple(ms.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
     """
     mrope_section = mrope_section * 2
-    cos = ops.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], axis=-1).unsqueeze(
+    cos = ops.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, axis=-1))], axis=-1).unsqueeze(
         unsqueeze_dim
     )
-    sin = ops.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], axis=-1).unsqueeze(
+    sin = ops.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section, axis=-1))], axis=-1).unsqueeze(
         unsqueeze_dim
     )
 
@@ -308,7 +307,7 @@ class VisionRotaryEmbedding(nn.Cell):
         # self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def construct(self, seqlen: int) -> ms.Tensor:
-        seq = ops.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        seq = ops.arange(seqlen, dtype=self.inv_freq.dtype)
         freqs = ops.outer(seq, self.inv_freq)
         return freqs
 
@@ -383,7 +382,7 @@ class VisionAttention(nn.Cell):
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
 
         attention_mask = ops.full(
-            [1, seq_length, seq_length], dtype_to_min(q.dtype), device=q.device, dtype=q.dtype
+            [1, seq_length, seq_length], dtype_to_min(q.dtype), dtype=q.dtype
         )
         for i in range(1, len(cu_seqlens)):
             attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
@@ -393,7 +392,7 @@ class VisionAttention(nn.Cell):
         v = v.swapaxes(0, 1)
         attn_weights = ops.matmul(q, k.swapaxes(1, 2)) / math.sqrt(self.head_dim)
         attn_weights = attn_weights + attention_mask
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=ms.float32).to(q.dtype)
+        attn_weights = ops.softmax(attn_weights, axis=-1).to(q.dtype)
         attn_output = ops.matmul(attn_weights, v)
         attn_output = attn_output.swapaxes(0, 1)
         attn_output = attn_output.reshape(seq_length, -1)
@@ -467,7 +466,7 @@ class VisionSdpaAttention(nn.Cell):
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
 
-        attention_mask = ops.zeros([1, seq_length, seq_length], dtype=ms.bool).device(q.device)
+        attention_mask = ops.zeros([1, seq_length, seq_length], dtype=ms.bool)
         for i in range(1, len(cu_seqlens)):
             attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = True
         q = q.swapaxes(0, 1)
@@ -513,7 +512,6 @@ def _prepare_4d_causal_attention_mask_with_cache_position(
     sequence_length: int,
     target_length: int,
     dtype: ms.dtype,
-    # device: ms.device,
     min_dtype: float,
     cache_position: ms.Tensor,
     batch_size: int,
@@ -531,8 +529,6 @@ def _prepare_4d_causal_attention_mask_with_cache_position(
             The target length: when generating with static cache, the mask should be as long as the static cache, to account for the 0 padding, the part of the cache that is not filled yet.
         dtype (`ms.dtype`):
             The dtype to use for the 4D attention mask.
-        # device (`ms.device`):
-        #     The device to plcae the 4D attention mask on.
         min_dtype (`float`):
             The minimum value representable with the dtype `dtype`.
         cache_position (`ms.Tensor`):
@@ -544,13 +540,14 @@ def _prepare_4d_causal_attention_mask_with_cache_position(
         # In this case we assume that the mask comes already in inverted form and requires no inversion or slicing.
         causal_mask = attention_mask
     else:
-        causal_mask = ops.full((sequence_length, target_length), fill_value=min_dtype, dtype=dtype, device=device)
+        causal_mask = ops.full((sequence_length, target_length), fill_value=min_dtype, dtype=dtype)
         if sequence_length != 1:
             causal_mask = ops.triu(causal_mask, diagonal=1)
-        causal_mask *= ops.arange(target_length, device=device) > cache_position.reshape(-1, 1)
-        causal_mask = causal_mask[None, None, :, :].expand(batch_size, 1, -1, -1)
+        causal_mask *= ops.arange(target_length) > cache_position.reshape(-1, 1)
+        causal_mask = causal_mask[None, None, :, :].broadcast_to((batch_size, 1, -1, -1))
         if attention_mask is not None:
-            causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
+            # causal_mask = causal_mask.clone()  # copy to contiguous memory for in-place edit
+            causal_mask = causal_mask.copy() 
             mask_length = attention_mask.shape[-1]
             padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :]
             padding_mask = padding_mask == 0
@@ -574,7 +571,7 @@ class Qwen2RMSNorm(nn.Cell):
     def construct(self, hidden_states):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(ms.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        variance = hidden_states.pow(2).mean(-1, keep_dims=True)
         hidden_states = hidden_states * ops.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
 
@@ -666,7 +663,7 @@ class Qwen2VLAttention(nn.Cell):
         cache_position: Optional[ms.Tensor] = None, #long
         position_embeddings: Optional[Tuple[ms.Tensor, ms.Tensor]] = None,  # will become mandatory in v4.46
     ) -> Tuple[ms.Tensor, Optional[ms.Tensor], Optional[Tuple[ms.Tensor]]]:
-        bsz, q_len, _ = hidden_states.size()
+        bsz, q_len, _ = hidden_states.shape
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
@@ -714,14 +711,14 @@ class Qwen2VLAttention(nn.Cell):
             attn_weights = ops.where(ops.isinf(attn_weights), ops.zeros_like(attn_weights), attn_weights)
 
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=ms.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+        attn_weights = ops.softmax(attn_weights, axis=-1).to(query_states.dtype)
+        attn_weights = ops.dropout(attn_weights, p=self.attention_dropout, training=self.training)
         attn_output = ops.matmul(attn_weights, value_states)
 
-        if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+        if attn_output.shape != (bsz, self.num_heads, q_len, self.head_dim):
             raise ValueError(
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
-                f" {attn_output.size()}"
+                f" {attn_output.shape}"
             )
 
         attn_output = attn_output.swapaxes(1, 2).contiguous()
@@ -763,7 +760,7 @@ class Qwen2VLFlashAttention2(Qwen2VLAttention):
         cache_position: Optional[ms.Tensor] = None,
         position_embeddings: Optional[Tuple[ms.Tensor, ms.Tensor]] = None,  # will become mandatory in v4.46
     ):
-        bsz, q_len, _ = hidden_states.size()
+        bsz, q_len, _ = hidden_states.shape
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
@@ -927,7 +924,7 @@ class Qwen2VLSdpaAttention(Qwen2VLAttention):
                 cache_position=cache_position,
             )
 
-        bsz, q_len, _ = hidden_states.size()
+        bsz, q_len, _ = hidden_states.shape
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
@@ -1127,15 +1124,6 @@ class Qwen2VLPreTrainedModel(MSPreTrainedModel):
 
     def _init_weights(self, module):
         pass
-        # std = self.config.initializer_range
-        # if isinstance(module, (nn.Dense, nn.Conv3d)):
-        #     module.weight.data.normal_(mean=0.0, std=std)
-        #     if module.bias is not None:
-        #         module.bias.data.zero_()
-        # elif isinstance(module, nn.Embedding):
-        #     module.weight.data.normal_(mean=0.0, std=std)
-        #     if module.padding_idx is not None:
-        #         module.weight.data[module.padding_idx].zero_()
 
 
 class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel):
@@ -1166,13 +1154,10 @@ class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel):
     def get_dtype(self) -> ms.dtype:
         return self.blocks[0].mlp.fc2.weight.dtype
 
-    # def get_device(self) -> torch.device:
-    #     return self.blocks[0].mlp.fc2.weight.device
-
     def rot_pos_emb(self, grid_thw):
         pos_ids = []
         for t, h, w in grid_thw:
-            hpos_ids = ops.arange(h).unsqueeze(1).expand(-1, w)
+            hpos_ids = ops.arange(h).unsqueeze(1).broadcast_to((-1, w))
             hpos_ids = hpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -1182,7 +1167,7 @@ class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel):
             hpos_ids = hpos_ids.permute(0, 2, 1, 3)
             hpos_ids = hpos_ids.flatten()
 
-            wpos_ids = ops.arange(w).unsqueeze(0).expand(h, -1)
+            wpos_ids = ops.arange(w).unsqueeze(0).broadcast_to((h, -1))
             wpos_ids = wpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -1284,12 +1269,12 @@ class Qwen2VLModel(Qwen2VLPreTrainedModel):
             past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
             cache_position = ops.arange(
                 past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1]
-            ) #device=inputs_embeds.device
+            ) 
 
         # the hard coded `3` is for temporal, height and width.
         if position_ids is None:
             position_ids = cache_position.view((1, 1, -1)).broadcast_to((3, inputs_embeds.shape[0], -1))
-        elif position_ids.ndim() == 2:
+        elif position_ids.ndim == 2:
             position_ids = position_ids[None, ...].broadcast_to((3, position_ids.shape[0], -1))
 
         causal_mask = self._update_causal_mask(
@@ -1389,7 +1374,7 @@ class Qwen2VLModel(Qwen2VLPreTrainedModel):
             ):
                 return None
 
-        dtype, device = input_tensor.dtype, input_tensor.device
+        dtype = input_tensor.dtype 
         # min_dtype = torch.finfo(dtype).min
         min_dtype = dtype_to_min(dtype)
         sequence_length = input_tensor.shape[1]
@@ -1411,7 +1396,7 @@ class Qwen2VLModel(Qwen2VLPreTrainedModel):
             min_dtype=min_dtype,
             cache_position=cache_position,
             batch_size=input_tensor.shape[0],
-        ) # device=device,
+        ) 
 
         if (
             self.config._attn_implementation == "sdpa"
@@ -1596,7 +1581,7 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
             total_input_ids = input_ids
             position_ids = ops.ones(
                 (3, input_ids.shape[0], input_ids.shape[1]), dtype=input_ids.dtype
-            ) #device=input_ids.device
+            ) 
             image_index, video_index = 0, 0
             for i, input_ids in enumerate(total_input_ids):
                 if attention_mask is not None:
@@ -1659,27 +1644,27 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
                     llm_pos_ids_list.append(ops.arange(text_len).view((1, -1)).broadcast_to((3, -1)) + st_idx)
 
                 llm_positions = ops.cat(llm_pos_ids_list, axis=1).reshape(3, -1)
-                position_ids[..., i, attention_mask[i] == 1] = llm_positions #.to(position_ids.device)
+                position_ids[..., i, attention_mask[i] == 1] = llm_positions 
                 mrope_position_deltas.append(llm_positions.max() + 1 - len(total_input_ids[i]))
-            mrope_position_deltas = ms.Tensor(mrope_position_deltas).unsqueeze(1) #, device=input_ids.device
+            mrope_position_deltas = ms.Tensor(mrope_position_deltas).unsqueeze(1) 
             return position_ids, mrope_position_deltas
         else:
             if attention_mask is not None:
-                position_ids = attention_mask.long().cumsum(-1) - 1
-                position_ids = ops.masked_fill(position_ids, attention_mask == 0, 1)
-                position_ids = position_ids.unsqueeze(0).broadcast_to((3, -1, -1)) #.to(input_ids.device)
+                position_ids = attention_mask.int().cumsum(-1) - 1
+                position_ids = ops.masked_fill(position_ids.long(), attention_mask == 0, 1)
+                position_ids = position_ids.unsqueeze(0).broadcast_to((3, -1, -1)) 
                 max_position_ids = position_ids.max(0, keepdims=False)[0].max(-1, keepdims=True)[0]
                 mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
             else:
                 position_ids = (
-                    ops.arange(input_ids.shape[1]) #device=input_ids.device
+                    ops.arange(input_ids.shape[1]) 
                     .view((1, 1, -1))
                     .broadcast_to((3, input_ids.shape[0], -1))
                 )
                 mrope_position_deltas = ops.zeros(
                     [input_ids.shape[0], 1],
                     dtype=input_ids.dtype,
-                ) # device=input_ids.device,
+                ) 
 
             return position_ids, mrope_position_deltas
 
@@ -1775,7 +1760,7 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
                 pixel_values = pixel_values.type(self.visual.dtype) 
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
                 image_mask = (input_ids == self.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-                image_embeds = image_embeds.to(inputs_embeds.dtype) #inputs_embeds.device,
+                image_embeds = image_embeds.to(inputs_embeds.dtype) 
                 inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
             if pixel_values_videos is not None:
@@ -1784,9 +1769,6 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
                 video_mask = (input_ids == self.config.video_token_id).unsqueeze(-1).expand_as(inputs_embeds)
                 video_embeds = video_embeds.to(inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-
-            # if attention_mask is not None:
-            #     attention_mask = attention_mask.to(inputs_embeds.device)
 
         outputs = self.model(
             input_ids=None,
@@ -1814,7 +1796,6 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
             shift_logits = shift_logits.view((-1, self.config.vocab_size))
             shift_labels = shift_labels.view((-1))
             # Enable model parallelism
-            # shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
 
         if not return_dict:
@@ -1865,7 +1846,7 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
                 delta = (
                     cache_position[0] + rope_deltas if cache_position is not None and rope_deltas is not None else 0
                 )
-                position_ids = ops.arange(seq_length) # device=input_ids.device
+                position_ids = ops.arange(seq_length) 
                 position_ids = position_ids.view((1, -1)).broadcast_to((batch_size, -1))
                 position_ids = position_ids.add(delta)
                 position_ids = position_ids.unsqueeze(0).broadcast_to((3, -1, -1))
@@ -1882,11 +1863,9 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
 
         if isinstance(past_key_values, StaticCache) and attention_mask.ndim == 2:
             if model_inputs["inputs_embeds"] is not None:
-                batch_size, sequence_length, _ = inputs_embeds.shape
-                # device = inputs_embeds.device
+                batch_size, sequence_length, _ = inputs_embeds.shape              
             else:
                 batch_size, sequence_length = input_ids.shape
-                # device = input_ids.device
 
             dtype = self.lm_head.weight.dtype
             # min_dtype = torch.finfo(dtype).min
@@ -1900,7 +1879,7 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
                 min_dtype=min_dtype,
                 cache_position=cache_position,
                 batch_size=batch_size,
-            ) #device=device,
+            ) 
 
         model_inputs.update(
             {

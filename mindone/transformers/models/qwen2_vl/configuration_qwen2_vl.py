@@ -20,7 +20,7 @@ from typing import Union
 # from mindnlp.transformers.configuration_utils import PretrainedConfig
 # from mindnlp.transformers.modeling_rope_utils import rope_config_validation
 from transformers.configuration_utils import PretrainedConfig #HF, TODO???
-from .modeling_rope_utils import rope_config_validation #HF, TODO??? not involve torch
+from .modeling_rope_utils import rope_config_validation #HF, TODO: reconsider place
 from transformers.utils import logging
 
 

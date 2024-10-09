@@ -125,6 +125,8 @@ def load_file(filename: Union[str, os.PathLike]) -> Dict[str, ms.Tensor]:
 
 def _np2ms(np_dict: Dict[str, np.ndarray]) -> Dict[str, ms.Tensor]:
     for k, v in np_dict.items():
+        if v.dtype == "bfloat16": # TODO: consider how to merge
+            v = v.astype(np.float32)
         np_dict[k] = ms.Parameter(v, name=k)
     return np_dict
 

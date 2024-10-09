@@ -1,19 +1,30 @@
-from PIL import Image
+from mindspore import Tensor
+from transformers import CLIPTokenizer
+from mindone.transformers import CLIPTextModel
+
+MODEL_NAME = "openai/clip-vit-large-patch14"
+model = CLIPTextModel.from_pretrained(MODEL_NAME)
+tokenizer = CLIPTokenizer.from_pretrained(MODEL_NAME)
+
+text_inputs = tokenizer(["a photo of a cat", "a photo of a dog"], padding=True, return_tensors="np")
+text_outputs = model(Tensor(text_inputs.input_ids))
+print(text_outputs)
+'''
+
 import requests
+from PIL import Image
+from transformers import Blip2Processor
+from mindone.transformers import Blip2ForConditionalGeneration
 
-from mindone.transformers import CLIPModel
-from transformers import CLIPProcessor
+processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
+model = Blip2ForConditionalGeneration.from_pretrained("Salesforce/blip2-opt-2.7b")
 
-model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+img_url = 'https://storage.googleapis.com/sfr-vision-language-research/BLIP/demo.jpg' 
+raw_image = Image.open(requests.get(img_url, stream=True).raw).convert('RGB')
 
-url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-image = Image.open(requests.get(url, stream=True).raw)
+question = "how many dogs are in the picture?"
+inputs = processor(raw_image, question, return_tensors="pt").to("cuda")
 
-inputs = processor(text=["a photo of a cat", "a photo of a dog"], images=image, return_tensors="pt", padding=True)
-
-outputs = model(**inputs)
-logits_per_image = outputs.logits_per_image  # this is the image-text similarity score
-probs = logits_per_image.softmax(dim=1)  # we can take the softmax to get the label probabilities
-
-print(probs)
+out = model.generate(**inputs)
+print(processor.decode(out[0], skip_special_tokens=True).strip())
+'''
