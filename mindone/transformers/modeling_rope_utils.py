@@ -11,20 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""rope utils""" #TODO: move to transformers
+"""rope utils""" 
 import math
 from typing import Optional, Tuple
 
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
-# TODO: is_mindspore_available
 
 logger = logging.get_logger(__name__)
 
+# TODO: is_mindspore_available
 # if is_mindspore_available():
 import mindspore as ms
 from mindspore import ops
-# from mindnlp.core import ops
 
 
 def _compute_default_rope_parameters(

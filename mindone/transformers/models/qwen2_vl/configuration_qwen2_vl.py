@@ -17,10 +17,8 @@
 import os
 from typing import Union
 
-# from mindnlp.transformers.configuration_utils import PretrainedConfig
-# from mindnlp.transformers.modeling_rope_utils import rope_config_validation
 from transformers.configuration_utils import PretrainedConfig #HF, TODO???
-from .modeling_rope_utils import rope_config_validation #HF, TODO: reconsider place
+from ...modeling_rope_utils import rope_config_validation # MindSpore version
 from transformers.utils import logging
 
 
@@ -42,6 +40,7 @@ class Qwen2VLVisionConfig(PretrainedConfig):
         patch_size=14,
         spatial_merge_size=2,
         temporal_patch_size=2,
+        initializer_range=0.02, # default Normal(sigma=0.02, mean=0.0) MindSpore Use
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -56,6 +55,7 @@ class Qwen2VLVisionConfig(PretrainedConfig):
         self.patch_size = patch_size
         self.spatial_merge_size = spatial_merge_size
         self.temporal_patch_size = temporal_patch_size
+        self.initializer_range = initializer_range 
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
@@ -169,7 +169,7 @@ class Qwen2VLConfig(PretrainedConfig):
                     Only used with 'llama3'. Scaling factor applied to high frequency components of the RoPE
 
     ```python
-    >>> from transformers import Qwen2VLForConditionalGeneration, Qwen2VLConfig
+    >>> from mindone.transformers import Qwen2VLForConditionalGeneration, Qwen2VLConfig
 
     >>> # Initializing a Qwen2VL style configuration
     >>> configuration = Qwen2VLConfig()

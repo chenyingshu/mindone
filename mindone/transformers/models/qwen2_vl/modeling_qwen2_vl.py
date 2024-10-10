@@ -26,14 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import mindspore as ms
 from mindspore import nn, ops
 from mindspore.nn import CrossEntropyLoss, LayerNorm
-# import torch => mindspore
-# import torch.nn as nn => nn
-# import torch.nn.functional as F => ops
-# import torch.utils.checkpoint #https://www.mindspore.cn/docs/zh-CN/r2.3.1/note/api_mapping/pytorch_diff/checkpoint.html
-# from torch.nn import CrossEntropyLoss, LayerNorm
 
-# implemented in mindone
-# from mindone.transformers.activations import ACT2FN
 from ...activations import ACT2FN
 from mindnlp.transformers.cache_utils import Cache, StaticCache #TODO involve torch: https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/cache_utils.py#L26
 # class Cache:
@@ -41,12 +34,7 @@ from mindnlp.transformers.cache_utils import Cache, StaticCache #TODO involve to
 # class StaticCache(Cache): #https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/cache_utils.py#L1034
 #     pass
 from mindnlp.transformers.generation import GenerationMixin #TODO involve torch judgement:https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/generation/utils.py#L328
-# class GenerationMixin:
-#     pass
 
-# from mindone.transformers.modeling_attn_mask_utils import (
-#     AttentionMaskConverter,
-# )
 from ...modeling_attn_mask_utils import (
     AttentionMaskConverter,
 )
@@ -54,11 +42,8 @@ from ...modeling_outputs import (
     BaseModelOutputWithPast,
     ModelOutput,
 )
-from .modeling_rope_utils import ROPE_INIT_FUNCTIONS #HF
-# from mindnlp.transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS # implemented in mindnlp => clone one # https://github.com/huggingface/transformers/blob/2bd4d5897dc73e8b172832070a6f9e567a0df017/src/transformers/modeling_rope_utils.py#L353
-# or install lastest version 0.4.0
+from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
-# from ...modeling_utils import PreTrainedModel
 from ...modeling_utils import MSPreTrainedModel # implemented in mindone
 
 from transformers.utils import ( #HF
@@ -79,7 +64,7 @@ if is_flash_attn_2_available():
 else:
     flash_attn_varlen_func = None
 
-from mindspore.common.initializer import initializer, Normal
+from mindspore.common.initializer import Normal
 
 logger = logging.get_logger(__name__)
 
@@ -92,7 +77,6 @@ _MAX_FP32 = ms.tensor(np.finfo(np.float32).min, dtype=ms.float32)
 _MAX_FP64 = ms.tensor(np.finfo(np.float64).min, dtype=ms.float64)
 _MAX_BF16 = ms.tensor(float.fromhex("-0x1.fe00000000000p+127"), dtype=ms.bfloat16)
 
-
 def dtype_to_max(dtype):
     if dtype == ms.float16:
         return _MAX_FP16
@@ -104,7 +88,6 @@ def dtype_to_max(dtype):
         return _MAX_BF16
     else:
         raise ValueError(f"Only support get minimum value of (float16, ), but got {dtype}")
-
 
 @dataclass
 class Qwen2VLCausalLMOutputWithPast(ModelOutput):
@@ -319,6 +302,7 @@ class PatchEmbed(nn.Cell):
         temporal_patch_size: int = 2,
         in_channels: int = 3,
         embed_dim: int = 1152,
+        init_std: float = 0.02,
     ) -> None:
         super().__init__()
         self.patch_size = patch_size
@@ -327,7 +311,7 @@ class PatchEmbed(nn.Cell):
         self.embed_dim = embed_dim
 
         kernel_size = (temporal_patch_size, patch_size, patch_size) # For 'Conv3d', the type of 'kernel_size' should be one of '['int', 'tuple']'
-        self.proj = nn.Conv3d(in_channels, embed_dim, kernel_size=kernel_size, stride=kernel_size, has_bias=False)
+        self.proj = nn.Conv3d(in_channels, embed_dim, kernel_size=kernel_size, stride=kernel_size, has_bias=False, weight_init=Normal(sigma=init_std))
 
     def construct(self, hidden_states: ms.Tensor) -> ms.Tensor:
         target_dtype = self.proj.weight.dtype
@@ -339,14 +323,14 @@ class PatchEmbed(nn.Cell):
 
 
 class PatchMerger(nn.Cell):
-    def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2) -> None:
+    def __init__(self, dim: int, context_dim: int, spatial_merge_size: int = 2, init_std: float = 0.02) -> None:
         super().__init__()
         self.hidden_size = context_dim * (spatial_merge_size**2)
         self.ln_q = LayerNorm([context_dim], epsilon=1e-6)
         self.mlp = nn.SequentialCell(
-            nn.Dense(self.hidden_size, self.hidden_size),
-            nn.GELU(),
-            nn.Dense(self.hidden_size, dim),
+            nn.Dense(self.hidden_size, self.hidden_size, weight_init=Normal(sigma=init_std), bias_init="zeros"),
+            nn.GELU(approximate=False),
+            nn.Dense(self.hidden_size, dim, weight_init=Normal(sigma=init_std), bias_init="zeros"),
         )
 
     def construct(self, x: ms.Tensor) -> ms.Tensor:
@@ -355,23 +339,25 @@ class PatchMerger(nn.Cell):
 
 
 class VisionMlp(nn.Cell):
-    def __init__(self, dim: int, hidden_dim: int, hidden_act: str) -> None:
+    def __init__(self, dim: int, hidden_dim: int, hidden_act: str, init_std: float) -> None:
         super().__init__()
-        self.fc1 = nn.Dense(dim, hidden_dim)
-        self.act = ACT2FN[hidden_act]
-        self.fc2 = nn.Dense(hidden_dim, dim)
+        self.fc1 = nn.Dense(dim, hidden_dim, weight_init=Normal(sigma=init_std), bias_init="zeros")
+        self.act = ACT2FN[hidden_act] # QuickGELUActivation()
+        self.fc2 = nn.Dense(hidden_dim, dim, weight_init=Normal(sigma=init_std), bias_init="zeros")
 
     def construct(self, x) -> ms.Tensor:
         return self.fc2(self.act(self.fc1(x)))
 
 
 class VisionAttention(nn.Cell):
-    def __init__(self, dim: int, num_heads: int = 16) -> None:
+    def __init__(self, dim: int, num_heads: int = 16, init_std: float = 0.02) -> None:
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.qkv = nn.Dense(dim, dim * 3, has_bias=True)
-        self.proj = nn.Dense(dim, dim)
+        # self.qkv = nn.Dense(dim, dim * 3, has_bias=True)
+        # self.proj = nn.Dense(dim, dim)  
+        self.qkv = nn.Dense(dim, dim * 3, has_bias=True, weight_init=Normal(sigma=init_std), bias_init="zeros")
+        self.proj = nn.Dense(dim, dim, weight_init=Normal(sigma=init_std), bias_init="zeros")
 
     def construct(
         self, hidden_states: ms.Tensor, cu_seqlens: ms.Tensor, rotary_pos_emb: ms.Tensor = None
@@ -401,11 +387,11 @@ class VisionAttention(nn.Cell):
 
 
 class VisionFlashAttention2(nn.Cell):
-    def __init__(self, dim: int, num_heads: int = 16) -> None:
+    def __init__(self, dim: int, num_heads: int = 16, init_std: float = 0.02) -> None:
         super().__init__()
         self.num_heads = num_heads
-        self.qkv = nn.Linear(dim, dim * 3, bias=True)
-        self.proj = nn.Linear(dim, dim)
+        self.qkv = nn.Dense(dim, dim * 3, has_bias=True, weight_init=Normal(sigma=init_std), bias_init="zeros")
+        self.proj = nn.Dense(dim, dim, weight_init=Normal(sigma=init_std), bias_init="zeros")
 
     def construct(
         self, hidden_states: ms.Tensor, cu_seqlens: ms.Tensor, rotary_pos_emb: ms.Tensor = None
@@ -452,11 +438,11 @@ def scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_caus
     return output
 
 class VisionSdpaAttention(nn.Cell):
-    def __init__(self, dim: int, num_heads: int = 16) -> None:
+    def __init__(self, dim: int, num_heads: int = 16, init_std: float = 0.02) -> None:
         super().__init__()
         self.num_heads = num_heads
-        self.qkv = nn.Linear(dim, dim * 3, bias=True)
-        self.proj = nn.Linear(dim, dim)
+        self.qkv = nn.Dense(dim, dim * 3, has_bias=True, weight_init=Normal(sigma=init_std), bias_init="zeros")
+        self.proj = nn.Dense(dim, dim, weight_init=Normal(sigma=init_std), bias_init="zeros")
 
     def construct(
         self, hidden_states: ms.Tensor, cu_seqlens: ms.Tensor, rotary_pos_emb: ms.Tensor = None
@@ -494,9 +480,9 @@ class Qwen2VLVisionBlock(nn.Cell):
         mlp_hidden_dim = int(config.embed_dim * config.mlp_ratio)
 
         self.attn = QWEN2_VL_VISION_ATTENTION_CLASSES[attn_implementation](
-            config.embed_dim, num_heads=config.num_heads
+            config.embed_dim, num_heads=config.num_heads, init_std=config.initializer_range
         )
-        self.mlp = VisionMlp(dim=config.embed_dim, hidden_dim=mlp_hidden_dim, hidden_act=config.hidden_act)
+        self.mlp = VisionMlp(dim=config.embed_dim, hidden_dim=mlp_hidden_dim, hidden_act=config.hidden_act, init_std=config.initializer_range)
 
     def construct(self, hidden_states, cu_seqlens, rotary_pos_emb) -> ms.Tensor:
         hidden_states = hidden_states + self.attn(
@@ -585,10 +571,11 @@ class Qwen2MLP(nn.Cell):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.gate_proj = nn.Dense(self.hidden_size, self.intermediate_size, has_bias=False)
-        self.up_proj = nn.Dense(self.hidden_size, self.intermediate_size, has_bias=False)
-        self.down_proj = nn.Dense(self.intermediate_size, self.hidden_size, has_bias=False)
-        self.act_fn = ACT2FN[config.hidden_act]
+        init_std = config.initializer_range
+        self.gate_proj = nn.Dense(self.hidden_size, self.intermediate_size, has_bias=False, weight_init=Normal(sigma=init_std))
+        self.up_proj = nn.Dense(self.hidden_size, self.intermediate_size, has_bias=False, weight_init=Normal(sigma=init_std))
+        self.down_proj = nn.Dense(self.intermediate_size, self.hidden_size, has_bias=False, weight_init=Normal(sigma=init_std))
+        self.act_fn = ACT2FN[config.hidden_act] #SiLU
 
     def construct(self, hidden_state):
         return self.down_proj(self.act_fn(self.gate_proj(hidden_state)) * self.up_proj(hidden_state))
@@ -641,10 +628,11 @@ class Qwen2VLAttention(nn.Cell):
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size}"
                 f" and `num_heads`: {self.num_heads})."
             )
-        self.q_proj = nn.Dense(self.hidden_size, self.num_heads * self.head_dim, has_bias=True)
-        self.k_proj = nn.Dense(self.hidden_size, self.num_key_value_heads * self.head_dim, has_bias=True)
-        self.v_proj = nn.Dense(self.hidden_size, self.num_key_value_heads * self.head_dim, has_bias=True)
-        self.o_proj = nn.Dense(self.num_heads * self.head_dim, self.hidden_size, has_bias=False)
+        init_std = config.initializer_range
+        self.q_proj = nn.Dense(self.hidden_size, self.num_heads * self.head_dim, has_bias=True, weight_init=Normal(sigma=init_std), bias_init="zeros")
+        self.k_proj = nn.Dense(self.hidden_size, self.num_key_value_heads * self.head_dim, has_bias=True, weight_init=Normal(sigma=init_std), bias_init="zeros")
+        self.v_proj = nn.Dense(self.hidden_size, self.num_key_value_heads * self.head_dim, has_bias=True, weight_init=Normal(sigma=init_std), bias_init="zeros")
+        self.o_proj = nn.Dense(self.num_heads * self.head_dim, self.hidden_size, has_bias=False, weight_init=Normal(sigma=init_std))
 
         self.rotary_emb = Qwen2VLRotaryEmbedding(
             self.head_dim,
@@ -1123,7 +1111,7 @@ class Qwen2VLPreTrainedModel(MSPreTrainedModel):
     _supports_static_cache = True
 
     def _init_weights(self, module):
-        pass
+        pass # initialize weights while instantialization
 
 
 class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel):
@@ -1139,6 +1127,7 @@ class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel):
             temporal_patch_size=config.temporal_patch_size,
             in_channels=config.in_channels,
             embed_dim=config.embed_dim,
+            init_std=config.initializer_range
         )
 
         head_dim = config.embed_dim // config.num_heads
@@ -1148,7 +1137,7 @@ class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel):
             [Qwen2VLVisionBlock(config, config._attn_implementation) for _ in range(config.depth)]
         )
         self.merger = PatchMerger(
-            dim=config.hidden_size, context_dim=config.embed_dim, spatial_merge_size=config.spatial_merge_size
+            dim=config.hidden_size, context_dim=config.embed_dim, spatial_merge_size=config.spatial_merge_size, init_std=config.initializer_range
         )
 
     def get_dtype(self) -> ms.dtype:
@@ -1208,10 +1197,9 @@ class Qwen2VLModel(Qwen2VLPreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        # Note!!!! parameters and order are different from Pytorch!
-        # TODO TBD: embedding_table = Normal(0.0, std=config.initializer_range)
-        # self.embed_tokens = nn.Embedding(vocab_size=config.vocab_size, embedding_size=config.hidden_size, embedding_table = Normal(0.0, std=config.initializer_range), padding_idx=self.padding_idx)
-        self.embed_tokens = nn.Embedding(vocab_size=config.vocab_size, embedding_size=config.hidden_size, padding_idx=self.padding_idx)
+        # Note: parameters and order are different from Pytorch!
+        self.embed_tokens = nn.Embedding(vocab_size=config.vocab_size, embedding_size=config.hidden_size, embedding_table = Normal(sigma=config.initializer_range), padding_idx=self.padding_idx)
+        # self.embed_tokens = nn.Embedding(vocab_size=config.vocab_size, embedding_size=config.hidden_size, padding_idx=self.padding_idx)
         self.layers = nn.CellList(
             [Qwen2VLDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
         )
@@ -1221,7 +1209,7 @@ class Qwen2VLModel(Qwen2VLPreTrainedModel):
 
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
-        self.post_init()
+        self.post_init() # do not involve in MindSpore
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -1497,11 +1485,11 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
         )
         self.model = Qwen2VLModel(config)
         self.vocab_size = config.vocab_size
-        self.lm_head = nn.Dense(config.hidden_size, config.vocab_size, has_bias=False)
+        self.lm_head = nn.Dense(config.hidden_size, config.vocab_size, has_bias=False, weight_init=Normal(sigma=config.initializer_range))
         self.padding_side = "left"  # set it to left by default, user can use setter to change padding_sides
 
         # Initialize weights and apply final processing
-        self.post_init()
+        self.post_init() # in mindspore, networks are initialized when instantialization
 
     def get_input_embeddings(self):
         return self.model.embed_tokens

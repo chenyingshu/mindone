@@ -135,8 +135,7 @@ class SiLUActivation(nn.Cell):
     """
 
     def construct(self, input: Tensor) -> Tensor:
-        return ops.silu(input) # ERROR: in pynative mode
-        # return input * ops.sigmoid(input)
+        return ops.silu(input)
 
 
 class MishActivation(nn.Cell):
