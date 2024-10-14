@@ -2073,3 +2073,6 @@ class MSPreTrainedModel(nn.Cell, ModuleUtilsMixin, PushToHubMixin, PeftAdapterMi
                 return False
         return True
     
+
+    def group_beam_search(cls):
+        pass

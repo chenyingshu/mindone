@@ -24,7 +24,6 @@ _MIN_FP32 = ms.tensor(np.finfo(np.float32).min, dtype=ms.float32)
 _MIN_FP64 = ms.tensor(np.finfo(np.float64).min, dtype=ms.float64)
 _MIN_BF16 = ms.tensor(float.fromhex("-0x1.fe00000000000p+127"), dtype=ms.bfloat16)
 
-
 def dtype_to_min(dtype):
     if dtype == ms.float16:
         return _MIN_FP16
@@ -34,6 +33,23 @@ def dtype_to_min(dtype):
         return _MIN_FP64
     if dtype == ms.bfloat16:
         return _MIN_BF16
+    else:
+        raise ValueError(f"Only support get minimum value of (float16, ), but got {dtype}")
+
+_MAX_FP16 = ms.tensor(np.finfo(np.float16).min, dtype=ms.float16)
+_MAX_FP32 = ms.tensor(np.finfo(np.float32).min, dtype=ms.float32)
+_MAX_FP64 = ms.tensor(np.finfo(np.float64).min, dtype=ms.float64)
+_MAX_BF16 = ms.tensor(float.fromhex("-0x1.fe00000000000p+127"), dtype=ms.bfloat16)
+
+def dtype_to_max(dtype):
+    if dtype == ms.float16:
+        return _MAX_FP16
+    if dtype == ms.float32:
+        return _MAX_FP32
+    if dtype == ms.float64:
+        return _MAX_FP64
+    if dtype == ms.bfloat16:
+        return _MAX_BF16
     else:
         raise ValueError(f"Only support get minimum value of (float16, ), but got {dtype}")
 

@@ -46,11 +46,8 @@ from .models.t5 import (
 )
 from .models.xlm_roberta import XLMRobertaModel, XLMRobertaPreTrainedModel
 
-# Qwen2-VL test
 from .models.qwen2_vl import (
     Qwen2VLConfig,
-    # Qwen2VLProcessor,
-    # Qwen2VLImageProcessor,
     Qwen2VLForConditionalGeneration,
     Qwen2VLModel,
     Qwen2VLPreTrainedModel,
