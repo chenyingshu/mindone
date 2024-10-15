@@ -363,8 +363,8 @@ class StopStringCriteria(StoppingCriteria):
             positions = token_valid_positions[stop_string]
             end_lens = token_end_overlaps[stop_string]
 
-            # Since this is lots of very small assignments of lists, we build it with numpy rather
-            # than torch for speed + simplicity, then convert to torch at the end
+            # Since this is lots of very small assignments of lists, we build it with numpy 
+            # for speed + simplicity, then convert to tensor at the end
             for token_idx, valid_positions in positions.items():
                 gather_vec[token_idx, max_valid_positions * i : max_valid_positions * i + len(valid_positions)] = (
                     valid_positions
@@ -434,7 +434,7 @@ class StopStringCriteria(StoppingCriteria):
         match = ops.cat([initial_match, later_match], axis=1)
 
         # Once a single position does not match, all positions following that position are masked
-        mask = (~match).cumsum(dim=1, dtype=ms.int32)
+        mask = (~match).cumsum(axis=1, dtype=ms.int32)
         mask = mask == 0
 
         # The string is matched if we reached a cumsum equal to or greater than the length of the string
@@ -464,7 +464,7 @@ class EosTokenCriteria(StoppingCriteria):
 
     @add_start_docstrings(STOPPING_CRITERIA_INPUTS_DOCSTRING)
     def __call__(self, input_ids: ms.Tensor, scores: ms.Tensor, **kwargs) -> ms.Tensor:
-        self.eos_token_id = self.eos_token_id.to(input_ids.device)
+        self.eos_token_id = self.eos_token_id
         is_done = ms.numpy.isin(input_ids[:, -1], self.eos_token_id)
         return is_done
 
