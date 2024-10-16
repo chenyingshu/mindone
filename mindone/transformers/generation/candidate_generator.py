@@ -304,7 +304,9 @@ class PromptLookupCandidateGenerator(CandidateGenerator):
         for ngram_size in range(min(self.max_matching_ngram_size, input_length - 1), 0, -1):
             # Create sliding windows of size ngram_size
             # windows = input_ids.unfold(dimension=1, size=ngram_size, step=1)
-            windows = input_ids.reshape(1,1,1,-1).unfold(kernel_size=(1, ngram_size), stride = 1).transpose(0,2,1) # TODO: to examine
+            windows = input_ids.reshape(1,1,1,-1).unfold(kernel_size=(1, ngram_size), stride = 1).transpose(0,2,1) 
+            # TODO: to examine, use ops.unfold to realize 1D unfold
+            # ref: https://stackoverflow.com/questions/73276139/why-is-nn-unfold-not-giving-me-the-same-results-as-unfold
 
             # Convert ngram to a tensor for comparison
             ngram_tensor = input_ids[0, -ngram_size:]

@@ -17,7 +17,7 @@
 import os
 from typing import Union
 
-from transformers.configuration_utils import PretrainedConfig #HF, TODO???
+from transformers.configuration_utils import PretrainedConfig #HF
 from ...modeling_rope_utils import rope_config_validation # MindSpore version
 from transformers.utils import logging
 

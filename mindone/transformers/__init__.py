@@ -52,3 +52,10 @@ from .models.qwen2_vl import (
     Qwen2VLModel,
     Qwen2VLPreTrainedModel,
 )
+
+from .generation import (
+    GenerationConfig,
+    TextIteratorStreamer,
+    TextStreamer,
+    WatermarkingConfig
+)

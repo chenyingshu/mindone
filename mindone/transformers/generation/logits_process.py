@@ -1784,7 +1784,7 @@ class LogitNormalization(LogitsProcessor):
 
     @add_start_docstrings(LOGITS_PROCESSOR_INPUTS_DOCSTRING)
     def __call__(self, input_ids: ms.Tensor, scores: ms.Tensor) -> ms.Tensor:
-        scores_processed = scores.log_softmax(axis=-1)
+        scores_processed = ops.log_softmax(scores, axis=-1)
         return scores_processed
 
 

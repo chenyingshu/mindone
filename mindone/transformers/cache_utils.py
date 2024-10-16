@@ -1222,7 +1222,7 @@ class HybridCache(Cache):
         batch_size: int = None,
         max_cache_len: int = None,
         device = None,
-        dtype = None
+        dtype = None,
         max_batch_size = None,
         layer_device_map = None
     ) -> None:

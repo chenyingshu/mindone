@@ -28,12 +28,8 @@ from mindspore import nn, ops
 from mindspore.nn import CrossEntropyLoss, LayerNorm
 
 from ...activations import ACT2FN
-from mindnlp.transformers.cache_utils import Cache, StaticCache #TODO involve torch: https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/cache_utils.py#L26
-# class Cache:
-#     pass
-# class StaticCache(Cache): #https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/cache_utils.py#L1034
-#     pass
-from mindnlp.transformers.generation import GenerationMixin #TODO involve torch judgement:https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/generation/utils.py#L328
+from ...cache_utils import Cache, StaticCache # Migrated Cache and DynamicCache to MS 
+from ...generation import GenerationMixin # Migrated to MS
 
 from ...modeling_attn_mask_utils import (
     AttentionMaskConverter,
@@ -44,7 +40,7 @@ from ...modeling_outputs import (
 )
 from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
-from ...modeling_utils import MSPreTrainedModel # implemented in mindone
+from ...modeling_utils import MSPreTrainedModel 
 
 from transformers.utils import ( #HF
     add_start_docstrings,

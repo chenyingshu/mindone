@@ -20,8 +20,6 @@ from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
-# TODO: is_mindspore_available
-# if is_mindspore_available():
 import mindspore as ms
 from mindspore import ops
 
