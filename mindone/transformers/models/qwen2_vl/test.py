@@ -101,13 +101,13 @@ inputs = processor(
     padding=True,
     return_tensors="np",
 )
-print("tokenized inputs", inputs)
+# print("tokenized inputs", inputs)
 # attention_mask = Tensor(inputs["attention_mask"]) #https://github.com/suno-ai/bark/issues/402
 # print(attention_mask)
 
 # Inference: Generation of the output
-# TODO: to include add inputs values as input, and conver to MS Tensors
-generated_ids = model.generate(**inputs, max_new_tokens=128) #dtype=ms.int64
+# TODO: to include add inputs values as input, and conver to MS Tensors, current data convesion does not perform properly yet
+generated_ids = model.generate(**inputs, max_new_tokens=128) #dtype=ms.int64 # 
 print("generated_ids.shape", generated_ids.shape)
 print("generated_ids", generated_ids)
 logger.info(generated_ids.shape)

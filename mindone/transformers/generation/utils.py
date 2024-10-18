@@ -1339,9 +1339,7 @@ class GenerationMixin:
             using_model_generation_config = True
 
         generation_config = copy.deepcopy(generation_config)
-        print("kwargs to update genconfig", kwargs)
         model_kwargs = generation_config.update(**kwargs)
-        print("get model_kwargs after update genconfig", model_kwargs)
 
         # If `generation_config` is provided, let's fallback ALL special tokens to the default values for the model
         if not using_model_generation_config:
@@ -1709,13 +1707,10 @@ class GenerationMixin:
                 elif isinstance(value, list):
                     kwargs[key] = ms.Tensor(value)
 
-        print("generate(kwargs=)", kwargs)
         self._validate_model_class()
         tokenizer = kwargs.pop("tokenizer", None)  # Pull this out first, we only use it for stopping criteria
         # 2. Set generation parameters if not already defined
         generation_config, model_kwargs = self._prepare_generation_config(generation_config, **kwargs)
-        print("generation_config after _prepare_generation_config", generation_config)
-        print("model_kwargs after _prepare_generation_config", model_kwargs) 
         self._validate_model_kwargs(model_kwargs.copy())
         self._validate_assistant(assistant_model)
 
@@ -1727,15 +1722,11 @@ class GenerationMixin:
         requires_attention_mask = "encoder_outputs" not in model_kwargs
         kwargs_has_attention_mask = model_kwargs.get("attention_mask", None) is not None
 
-        print("generate(inputs=)", inputs)
         # 3. Define model inputs
         inputs_tensor, model_input_name, model_kwargs = self._prepare_model_inputs(
             inputs, generation_config.bos_token_id, model_kwargs
         )
         batch_size = inputs_tensor.shape[0]
-        print("inputs_tensor after _prepare_model_inputs()", inputs_tensor)
-        print("model_input_name after _prepare_model_inputs()", model_input_name)
-        print("model_kwargs after _prepare_model_inputs()", model_kwargs)
 
         self._prepare_special_tokens(generation_config, kwargs_has_attention_mask)
 
@@ -1778,11 +1769,9 @@ class GenerationMixin:
                 inputs_tensor, model_kwargs, model_input_name, generation_config
             )
         
-        print("model_kwargs after _prepare_XXX_for_generation()", model_kwargs)
 
         # 5. Prepare `input_ids` which will be used for auto-regressive generation
         if self.config.is_encoder_decoder:
-            print("Enter _prepare_decoder_input_ids_for_generation...")
             input_ids, model_kwargs = self._prepare_decoder_input_ids_for_generation(
                 batch_size=batch_size,
                 model_input_name=model_input_name,
@@ -1792,14 +1781,8 @@ class GenerationMixin:
         else:
             input_ids = inputs_tensor if model_input_name == "input_ids" else model_kwargs.pop("input_ids")
         
-        print("input_ids after _prepare_decoder_input_ids_for_generation()", input_ids)
-        print("model_kwargs after _prepare_decoder_input_ids_for_generation()", model_kwargs)
-        
         if generation_config.token_healing:
-            print("Enter heal_tokens...")
             input_ids = self.heal_tokens(input_ids, tokenizer)
-        
-        print("input_ids after heal_tokens()", input_ids)
 
         if streamer is not None:
             streamer.put(input_ids)
