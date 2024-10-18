@@ -12,7 +12,7 @@ from packaging import version
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import (
     # is_hqq_available,
-    is_optimum_quanto_available,
+    # is_optimum_quanto_available,
     is_quanto_available,
     logging,
 )
@@ -677,9 +677,9 @@ class QuantoQuantizedCache(QuantizedCache):
     def __init__(self, cache_config: CacheConfig) -> None:
         super().__init__(cache_config)
 
-        if is_optimum_quanto_available():
-            from optimum.quanto import MaxOptimizer, qint2, qint4
-        elif is_quanto_available():
+        # if is_optimum_quanto_available():
+        #     from optimum.quanto import MaxOptimizer, qint2, qint4
+        if is_quanto_available():
             logger.warning_once(
                 "Importing from quanto will be deprecated in v4.47. Please install optimum-quanto instead `pip install optimum-quanto`"
             )
@@ -707,13 +707,14 @@ class QuantoQuantizedCache(QuantizedCache):
 
     def _quantize(self, tensor, axis):
         # We have two different API since in optimum-quanto, we don't use AffineQuantizer anymore
-        if is_optimum_quanto_available():
-            from optimum.quanto import quantize_weight
+        # if is_optimum_quanto_available():
+        #     from optimum.quanto import quantize_weight
 
-            scale, zeropoint = self.optimizer(tensor, self.qtype, axis, self.q_group_size)
-            qtensor = quantize_weight(tensor, self.qtype, axis, scale, zeropoint, self.q_group_size)
-            return qtensor
-        elif is_quanto_available():
+        #     scale, zeropoint = self.optimizer(tensor, self.qtype, axis, self.q_group_size)
+        #     qtensor = quantize_weight(tensor, self.qtype, axis, scale, zeropoint, self.q_group_size)
+        #     return qtensor
+        # el
+        if is_quanto_available():
             logger.warning_once(
                 "Importing from quanto will be deprecated in v4.47. Please install optimum-quanto instead `pip install optimum-quanto`"
             )

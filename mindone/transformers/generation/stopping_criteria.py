@@ -493,7 +493,7 @@ class ConfidenceCriteria(StoppingCriteria):
 class StoppingCriteriaList(list):
     @add_start_docstrings(STOPPING_CRITERIA_INPUTS_DOCSTRING)
     def __call__(self, input_ids: ms.Tensor, scores: ms.Tensor, **kwargs) -> ms.Tensor:
-        is_done = ops.full((input_ids.shape[0],), False, dtype=ms.bool_)
+        is_done = ops.full((input_ids.shape[0],), False, dtype=ms.uint8) #elementwise or operate on int (at least one element in int)
         for criteria in self:
             is_done = is_done | criteria(input_ids, scores, **kwargs)
         return is_done

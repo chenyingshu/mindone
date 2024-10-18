@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 import mindspore as ms
 from mindspore import ops
 
-from transformers.cache_utils import DynamicCache
+from ..cache_utils import DynamicCache
 from .logits_process import LogitsProcessorList, MinLengthLogitsProcessor
 
 
@@ -420,7 +420,7 @@ def _prepare_attention_mask(model_kwargs: Dict[str, Any], new_length: int, is_en
     if mask_length_diff < 0:
         model_kwargs[mask_key] = mask[:, :mask_length_diff]
     elif mask_length_diff > 0:
-        model_kwargs[mask_key] = ops.cat([mask, mask.new_ones((mask.shape[0], mask_length_diff))], axis=-1)
+        model_kwargs[mask_key] = ops.cat([mask, mask.new_ones((mask.shape[0], mask_length_diff), dtype=mask.dtype)], axis=-1)
     return model_kwargs
 
 

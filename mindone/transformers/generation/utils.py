@@ -26,9 +26,9 @@ import mindspore as ms
 from mindspore import ops, nn
 
 # from ..models.auto import () # TODO?
-from ...modeling_attn_mask_utils import dtype_to_min
+from ..modeling_attn_mask_utils import dtype_to_min
 
-from transformers.cache_utils import ( # Convereted some in MS version
+from ..cache_utils import ( # Convereted some in MS version
     Cache,
     DynamicCache,
     EncoderDecoderCache,
@@ -426,7 +426,7 @@ class GenerationMixin:
         if self.config.is_encoder_decoder and encoder_outputs is not None:
             # make dummy input_ids with value -100, as a sanity check ensuring that they won't be used for encoding
             shape = encoder_outputs.last_hidden_state.size()[:-1]
-            return ops.ones(shape, dtype=ms.int32) * -100
+            return ops.ones(shape, dtype=ms.int64) * -100
 
         # If there is some tensor in `model_kwargs`, we can infer the batch size from it. This is helpful with
         # soft-prompting or in multimodal implementations built on top of decoder-only language models.
@@ -437,12 +437,12 @@ class GenerationMixin:
                 break
 
         if "inputs_embeds" in model_kwargs:
-            return ops.ones((batch_size, 0), dtype=ms.int32)
+            return ops.ones((batch_size, 0), dtype=ms.int64)
 
         if bos_token_id is None:
             raise ValueError("`bos_token_id` has to be defined when no `input_ids` are provided.")
 
-        return ops.ones((batch_size, 1), dtype=ms.int32) * bos_token_id
+        return ops.ones((batch_size, 1), dtype=ms.int64) * bos_token_id
 
     def _prepare_attention_mask_for_generation(
         self,
@@ -455,7 +455,7 @@ class GenerationMixin:
         if pad_token_id is None:
             return default_attention_mask
 
-        is_input_ids = len(inputs.shape) == 2 and inputs.dtype in [ms.int32, ms.int64]
+        is_input_ids = len(inputs.shape) == 2 and inputs.dtype in [ms.int64, ms.int64]
         if not is_input_ids:
             return default_attention_mask
 
@@ -529,7 +529,7 @@ class GenerationMixin:
             decoder_start_token_id = decoder_start_token_id.view(-1, 1)
         else:
             decoder_start_token_id = (
-                ops.ones((batch_size, 1), dtype=ms.int32) * decoder_start_token_id
+                ops.ones((batch_size, 1), dtype=ms.int64) * decoder_start_token_id
             )
 
         # 3. Encoder-decoder models expect the `decoder_input_ids` to start with a special token. Let's ensure that.
@@ -632,14 +632,14 @@ class GenerationMixin:
             if "attention_mask" in model_kwargs:
                 attention_mask = model_kwargs["attention_mask"]
                 model_kwargs["attention_mask"] = ops.cat(
-                    [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], axis=-1
-                )
+                    [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1), dtype=attention_mask.dtype)], axis=-1
+                ) # TODO: Bug to be resolved in MindSpore 2.3.1
         else:
             # update decoder attention mask
             if "decoder_attention_mask" in model_kwargs:
                 decoder_attention_mask = model_kwargs["decoder_attention_mask"]
                 model_kwargs["decoder_attention_mask"] = ops.cat(
-                    [decoder_attention_mask, decoder_attention_mask.new_ones((decoder_attention_mask.shape[0], 1))],
+                    [decoder_attention_mask, decoder_attention_mask.new_ones((decoder_attention_mask.shape[0], 1), dtype=decoder_attention_mask.dtype)],
                     axis=-1,
                 )
 
@@ -1145,7 +1145,6 @@ class GenerationMixin:
 
     def _validate_model_kwargs(self, model_kwargs: Dict[str, Any]):
         """Validates model kwargs for generation. Generate argument typos will also be caught here."""
-        ## Do not support Cache ##
         # If a `Cache` instance is passed, checks whether the model is compatible with it
         if isinstance(model_kwargs.get("past_key_values", None), Cache) and not self._supports_cache_class:
             raise ValueError(
@@ -1159,14 +1158,14 @@ class GenerationMixin:
                 model_kwargs.pop(key, None)
 
         unused_model_args = []
-        model_args = set(inspect.signature(self.prepare_inputs_for_generation).parameters)
+        model_args = set(inspect.signature(self.prepare_inputs_for_generation).parameters) 
         # `kwargs`/`model_kwargs` is often used to handle optional construct pass inputs like `attention_mask`. If
         # `prepare_inputs_for_generation` doesn't accept them, then a stricter check can be made ;)
         if "kwargs" in model_args or "model_kwargs" in model_args:
             model_args |= set(inspect.signature(self.construct).parameters)
 
         # Encoder-Decoder models may also need Encoder arguments from `model_kwargs`
-        if self.config.is_encoder_decoder:
+        if self.config.is_encoder_decoder: 
             base_model = getattr(self, self.base_model_prefix, None)
 
             # allow encoder kwargs
@@ -1177,22 +1176,22 @@ class GenerationMixin:
             if encoder is None and base_model is not None:
                 encoder = getattr(base_model, "encoder", None)
 
-            if encoder is not None:
+            if encoder is not None: 
                 encoder_model_args = set(inspect.signature(encoder.construct).parameters)
-                model_args |= encoder_model_args
+                model_args |= encoder_model_args 
 
             # allow decoder kwargs
             decoder = getattr(self, "decoder", None)
             if decoder is None and base_model is not None:
                 decoder = getattr(base_model, "decoder", None)
 
-            if decoder is not None:
+            if decoder is not None: 
                 decoder_model_args = set(inspect.signature(decoder.construct).parameters)
-                model_args |= {f"decoder_{x}" for x in decoder_model_args}
+                model_args |= {f"decoder_{x}" for x in decoder_model_args} 
 
             # allow assistant_encoder_outputs to be passed if we're doing assisted generating
             if "assistant_encoder_outputs" in model_kwargs:
-                model_args |= {"assistant_encoder_outputs"}
+                model_args |= {"assistant_encoder_outputs"} 
 
         for key, value in model_kwargs.items():
             if value is not None and key not in model_args:
@@ -1340,7 +1339,9 @@ class GenerationMixin:
             using_model_generation_config = True
 
         generation_config = copy.deepcopy(generation_config)
+        print("kwargs to update genconfig", kwargs)
         model_kwargs = generation_config.update(**kwargs)
+        print("get model_kwargs after update genconfig", model_kwargs)
 
         # If `generation_config` is provided, let's fallback ALL special tokens to the default values for the model
         if not using_model_generation_config:
@@ -1359,9 +1360,10 @@ class GenerationMixin:
         """Calculates `cache_position` for the pre-fill stage based on `input_ids` and optionally past length"""
         # `torch.compile`-friendly `torch.arange` from a shape -- the lines below are equivalent to `torch.arange`
         if "inputs_embeds" in model_kwargs:
-            cache_position = ops.ones_like(model_kwargs["inputs_embeds"][0, :, 0], dtype=ms.int64).cumsum(0) - 1
+            cache_position = ops.ones_like(model_kwargs["inputs_embeds"][0, :, 0], dtype=ms.int32).cumsum(0) - 1
         else:
-            cache_position = ops.ones_like(input_ids[0, :], dtype=ms.int64).cumsum(0) - 1
+            cache_position = ops.ones_like(input_ids[0, :], dtype=ms.int32).cumsum(0) - 1
+        cache_position.to(input_ids.dtype)
 
         past_length = 0
         if model_kwargs.get("past_key_values") is not None:
@@ -1545,7 +1547,7 @@ class GenerationMixin:
 
             if isinstance(token, ms.Tensor):
                 return token
-            return ms.Tensor(token, dtype=ms.int32)
+            return ms.Tensor(token, dtype=ms.int64)
 
         bos_token_tensor = _tensor_or_none(generation_config.bos_token_id)
         eos_token_tensor = _tensor_or_none(generation_config.eos_token_id)
@@ -1582,7 +1584,7 @@ class GenerationMixin:
         # if not is_torchdynamo_compiling():  # Checks that depend on tensor-dependent control flow
         if (
             eos_token_tensor is not None
-            and ms.numpy.isin(elements=eos_token_tensor, test_elements=pad_token_tensor).any()
+            and ms.numpy.isin(eos_token_tensor, pad_token_tensor).any()
         ):
             if kwargs_has_attention_mask is not None and not kwargs_has_attention_mask:
                 logger.warning_once(
@@ -1700,11 +1702,20 @@ class GenerationMixin:
                     - [`~generation.GenerateBeamEncoderDecoderOutput`]
         """
         # 1. Handle `generation_config` and kwargs that might update it, and validate the `.generate()` call
+        if kwargs is not None: # Convert to ms.Tensor
+            for key, value in kwargs.items(): # by default input numpy array
+                if isinstance(value, np.ndarray):
+                    kwargs[key] = ms.Tensor(value)
+                elif isinstance(value, list):
+                    kwargs[key] = ms.Tensor(value)
+
+        print("generate(kwargs=)", kwargs)
         self._validate_model_class()
         tokenizer = kwargs.pop("tokenizer", None)  # Pull this out first, we only use it for stopping criteria
-
         # 2. Set generation parameters if not already defined
         generation_config, model_kwargs = self._prepare_generation_config(generation_config, **kwargs)
+        print("generation_config after _prepare_generation_config", generation_config)
+        print("model_kwargs after _prepare_generation_config", model_kwargs) 
         self._validate_model_kwargs(model_kwargs.copy())
         self._validate_assistant(assistant_model)
 
@@ -1716,14 +1727,19 @@ class GenerationMixin:
         requires_attention_mask = "encoder_outputs" not in model_kwargs
         kwargs_has_attention_mask = model_kwargs.get("attention_mask", None) is not None
 
+        print("generate(inputs=)", inputs)
         # 3. Define model inputs
         inputs_tensor, model_input_name, model_kwargs = self._prepare_model_inputs(
             inputs, generation_config.bos_token_id, model_kwargs
         )
         batch_size = inputs_tensor.shape[0]
+        print("inputs_tensor after _prepare_model_inputs()", inputs_tensor)
+        print("model_input_name after _prepare_model_inputs()", model_input_name)
+        print("model_kwargs after _prepare_model_inputs()", model_kwargs)
 
         self._prepare_special_tokens(generation_config, kwargs_has_attention_mask)
 
+        print(self.config.is_encoder_decoder, "self.config.is_encoder_decoder")
         # decoder-only models must use left-padding for batched generation.
         if not self.config.is_encoder_decoder: #and not is_torchdynamo_compiling():
             # If `input_ids` was given, check if the last id in any sequence is `pad_token_id`
@@ -1761,9 +1777,12 @@ class GenerationMixin:
             model_kwargs = self._prepare_encoder_decoder_kwargs_for_generation(
                 inputs_tensor, model_kwargs, model_input_name, generation_config
             )
+        
+        print("model_kwargs after _prepare_XXX_for_generation()", model_kwargs)
 
         # 5. Prepare `input_ids` which will be used for auto-regressive generation
         if self.config.is_encoder_decoder:
+            print("Enter _prepare_decoder_input_ids_for_generation...")
             input_ids, model_kwargs = self._prepare_decoder_input_ids_for_generation(
                 batch_size=batch_size,
                 model_input_name=model_input_name,
@@ -1772,12 +1791,18 @@ class GenerationMixin:
             )
         else:
             input_ids = inputs_tensor if model_input_name == "input_ids" else model_kwargs.pop("input_ids")
-
+        
+        print("input_ids after _prepare_decoder_input_ids_for_generation()", input_ids)
+        print("model_kwargs after _prepare_decoder_input_ids_for_generation()", model_kwargs)
+        
         if generation_config.token_healing:
+            print("Enter heal_tokens...")
             input_ids = self.heal_tokens(input_ids, tokenizer)
+        
+        print("input_ids after heal_tokens()", input_ids)
 
-        # if streamer is not None:
-        #     streamer.put(input_ids.cpu())
+        if streamer is not None:
+            streamer.put(input_ids)
 
         # 6. Prepare `max_length` depending on other stopping criteria.
         input_ids_length = input_ids.shape[-1]
@@ -2255,7 +2280,7 @@ class GenerationMixin:
 
         # keep track of which sequences are already finished
         batch_size = input_ids.shape[0]
-        unfinished_sequences = ops.ones((batch_size), dtype=ms.int32)
+        unfinished_sequences = ops.ones((batch_size), dtype=ms.int64)
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
         this_peer_finished = False
@@ -2357,8 +2382,8 @@ class GenerationMixin:
                     )
 
             if do_sample:  # sample
-                probs = nn.functional.softmax(next_token_scores, dim=-1)
-                next_tokens = ops.multinomial(probs, num_samples=1).squeeze(1)
+                probs = ops.softmax(next_token_scores, axis=-1)
+                next_tokens = ops.multinomial(probs, num_samples=1, replacement = False).squeeze(1)
             else:  # argmax
                 next_tokens = ops.argmax(next_token_scores, axis=-1)
 
@@ -2367,9 +2392,9 @@ class GenerationMixin:
                 next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
 
             # update generated ids, model inputs, and length for next step
-            input_ids = ops.cat([input_ids, next_tokens[:, None]], axis=-1)
-            # if streamer is not None:
-            #     streamer.put(next_tokens.cpu())
+            input_ids = ops.cat((input_ids, next_tokens[:, None]), axis=-1)
+            if streamer is not None:
+                streamer.put(next_tokens)
             model_kwargs = self._update_model_kwargs_for_generation(
                 outputs,
                 model_kwargs,
@@ -2377,7 +2402,7 @@ class GenerationMixin:
             )
 
             # stop when each sentence is finished
-            unfinished_sequences = unfinished_sequences & ~stopping_criteria(input_ids, scores)
+            unfinished_sequences = unfinished_sequences & (~stopping_criteria(input_ids, scores)).int()
             this_peer_finished = unfinished_sequences.max() == 0
 
         if streamer is not None:
@@ -2464,11 +2489,11 @@ class GenerationMixin:
 
         # keep track of which sequences are already finished
         batch_size = input_ids.shape[0]
-        unfinished_sequences = ops.ones(batch_size, dtype=ms.int32)
+        unfinished_sequences = ops.ones(batch_size, dtype=ms.int64)
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
         # Create cosine_matrix_mask based on the attention_mask
-        cosine_matrix_mask = ops.ones_like(input_ids, dtype=ms.int32)
+        cosine_matrix_mask = ops.ones_like(input_ids, dtype=ms.int64)
         if self.config.is_encoder_decoder:
             if "decoder_attention_mask" in model_kwargs and model_kwargs["decoder_attention_mask"] is not None:
                 cosine_matrix_mask = model_kwargs["decoder_attention_mask"]
@@ -2647,7 +2672,7 @@ class GenerationMixin:
                 context_hidden, next_hidden, top_k_probs, cosine_matrix_mask, penalty_alpha, top_k
             )
             cosine_matrix_mask = ops.cat(
-                [cosine_matrix_mask, cosine_matrix_mask.new_ones((cosine_matrix_mask.shape[0], 1))], axis=-1
+                [cosine_matrix_mask, cosine_matrix_mask.new_ones((cosine_matrix_mask.shape[0], 1), dtype=cosine_matrix_mask.dtype)], axis=-1
             )
             # selected_idx = selected_idx.to("cpu")
 
@@ -2868,7 +2893,7 @@ class GenerationMixin:
         # keep track of which sequences are already finished
         batch_size, cur_len = input_ids.shape
         this_peer_finished = False
-        unfinished_sequences = ops.ones(batch_size, dtype=ms.int32)
+        unfinished_sequences = ops.ones(batch_size, dtype=ms.int64)
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
         while self._has_unfinished_sequences(
@@ -2919,7 +2944,7 @@ class GenerationMixin:
             if do_sample:
                 probs = ops.softmax(next_token_scores, axis=-1)
                 # TODO (joao): this OP throws "skipping cudagraphs due to ['incompatible ops']", find solution
-                next_tokens = ops.multinomial(probs, num_samples=1).squeeze(1)
+                next_tokens = ops.multinomial(probs, num_samples=1, replacement=False).squeeze(1)
             else:
                 next_tokens = ops.argmax(next_token_scores, axis=-1)
 
@@ -2936,7 +2961,6 @@ class GenerationMixin:
                 model_kwargs,
                 is_encoder_decoder=self.config.is_encoder_decoder,
             )
-
             unfinished_sequences = unfinished_sequences & ~stopping_criteria(input_ids, scores)
             this_peer_finished = unfinished_sequences.max() == 0
             cur_len += 1
@@ -3178,7 +3202,7 @@ class GenerationMixin:
             n_tokens_to_keep = max(2, 1 + n_eos_tokens) * num_beams
             if do_sample:
                 probs = ops.softmax(next_token_scores, axis=-1)
-                next_tokens = ops.multinomial(probs, num_samples=n_tokens_to_keep)
+                next_tokens = ops.multinomial(probs, num_samples=n_tokens_to_keep, replacement = False)
                 next_token_scores = ops.gather_elements(next_token_scores, -1, next_tokens)
                 next_token_scores, _indices = ops.sort(next_token_scores, descending=True, axis=1)
                 next_tokens = ops.gather_elements(next_tokens, -1, _indices)
@@ -3375,7 +3399,7 @@ class GenerationMixin:
             current_tokens = ops.zeros(batch_size * num_beams, dtype=input_ids.dtype)
 
             # indices which will form the beams in the next time step
-            reordering_indices = ops.zeros(batch_size * num_beams, dtype=ms.int32)
+            reordering_indices = ops.zeros(batch_size * num_beams, dtype=ms.int64)
 
             # do one decoder step on all beams of all sentences in batch
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
@@ -3872,7 +3896,7 @@ class GenerationMixin:
 
         # keep track of which sequences are already finished
         batch_size = input_ids.shape[0]
-        unfinished_sequences = ops.ones(batch_size, dtype=ms.int32)
+        unfinished_sequences = ops.ones(batch_size, dtype=ms.int64)
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
         # This is needed if return_dict_in_generate is True
@@ -3912,7 +3936,7 @@ class GenerationMixin:
                 candidate_kwargs["cache_position"] = ops.cat(
                     (
                         candidate_kwargs["cache_position"],
-                        ops.arange(cur_len, cur_len + candidate_length, dtype=ms.int32),
+                        ops.arange(cur_len, cur_len + candidate_length, dtype=ms.int64),
                     ),
                     axis=0,
                 )
@@ -3954,7 +3978,7 @@ class GenerationMixin:
             else:
                 if do_sample:
                     probs = new_logits.softmax(axis=-1)
-                    selected_tokens = ops.multinomial(probs[0, :, :], num_samples=1).squeeze(1)[None, :]
+                    selected_tokens = ops.multinomial(probs[0, :, :], num_samples=1, replacement = False).squeeze(1)[None, :]
                 else:
                     selected_tokens = new_logits.argmax(axis=-1)
 
@@ -4126,7 +4150,7 @@ def _speculative_sampling(
             p_prime = p_prime.div(p_prime.sum())
         else:
             p_prime = p_n_plus_1
-        t = ops.multinomial(p_prime, num_samples=1).squeeze(1)[None, :]
+        t = ops.multinomial(p_prime, num_samples=1, replacement = False).squeeze(1)[None, :]
 
         # The selected tokens include the matches (if any) plus the next sampled tokens
         if n_matches > 0:

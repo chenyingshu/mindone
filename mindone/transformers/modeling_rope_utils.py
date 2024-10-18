@@ -58,7 +58,7 @@ def _compute_default_rope_parameters(
     attention_factor = 1.0  # Unused in this type of RoPE
 
     # Compute the inverse frequencies
-    inv_freq = 1.0 / (base ** (ops.arange(0, dim, 2, dtype=ms.int64).float() / dim))
+    inv_freq = 1.0 / (base ** (ops.arange(0, dim, 2, dtype=ms.int32).float() / dim))
     return inv_freq, attention_factor
 
 
@@ -143,7 +143,7 @@ def _compute_dynamic_ntk_parameters(
 
     # Compute the inverse frequencies
     base = base * ((factor * seq_len / max_position_embeddings) - (factor - 1)) ** (dim / (dim - 2)) # pylint: disable=used-before-assignment
-    inv_freq = 1.0 / (base ** (ops.arange(0, dim, 2, dtype=ms.int64).float() / dim))
+    inv_freq = 1.0 / (base ** (ops.arange(0, dim, 2, dtype=ms.int32).float() / dim))
     return inv_freq, attention_factor
 
 
@@ -279,7 +279,7 @@ def _compute_longrope_parameters(
         ext_factors = ms.Tensor(long_factor, dtype=ms.float32)
     else:
         ext_factors = ms.tensor(short_factor, dtype=ms.float32)
-    inv_freq_shape = ops.arange(0, dim, 2, dtype=ms.int64).float() / dim
+    inv_freq_shape = ops.arange(0, dim, 2, dtype=ms.int32).float() / dim
     inv_freq = 1.0 / (ext_factors * base**inv_freq_shape)
 
     return inv_freq, attention_factor

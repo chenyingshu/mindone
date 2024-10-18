@@ -346,10 +346,10 @@ class RepetitionPenaltyLogitsProcessor(LogitsProcessor):
 
     @add_start_docstrings(LOGITS_PROCESSOR_INPUTS_DOCSTRING)
     def __call__(self, input_ids: ms.Tensor, scores: ms.Tensor) -> ms.Tensor:
-        score = ms.gather(scores, 1, input_ids)
+        score = ops.gather_elements(scores, 1, input_ids)
 
         # if score < 0 then repetition penalty has to be multiplied to reduce the token probabilities
-        score = ms.where(score < 0, score * self.penalty, score / self.penalty)
+        score = ops.where(score < 0, score * self.penalty, score / self.penalty)
 
         scores_processed = scores.scatter(1, input_ids, score)
         return scores_processed
@@ -469,12 +469,12 @@ class TopPLogitsWarper(LogitsProcessor):
         cumulative_probs = sorted_logits.softmax(axis=-1).cumsum(axis=-1)
 
         # Remove tokens with cumulative top_p above the threshold (token with 0 are kept)
-        sorted_indices_to_remove = cumulative_probs <= (1 - self.top_p)
+        sorted_indices_to_remove = (cumulative_probs <= (1 - self.top_p)).int()
         # Keep at least min_tokens_to_keep
         sorted_indices_to_remove[..., -self.min_tokens_to_keep :] = 0
 
         # scatter sorted tensors to original indexing
-        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove).bool() # scatter does not support bool
         scores_processed = scores.masked_fill(indices_to_remove, self.filter_value)
         return scores_processed
 
@@ -605,8 +605,9 @@ class MinPLogitsWarper(LogitsProcessor):
         sorted_indices_to_remove = ops.gather_elements(tokens_to_remove, -1, index=sorted_indices)
         # Keep at least min_tokens_to_keep
         sorted_indices_to_remove[..., : self.min_tokens_to_keep] = False
+        sorted_indices_to_remove = sorted_indices_to_remove.int()
 
-        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove).bool()
         scores_processed = scores.masked_fill(indices_to_remove, self.filter_value)
         return scores_processed
 
@@ -692,9 +693,9 @@ class TypicalLogitsWarper(LogitsProcessor):
         # Remove tokens with cumulative mass above the threshold
         last_ind = (cumulative_probs < self.mass).sum(dim=1)
         last_ind.clamp_(max=sorted_scores.shape[-1] - 1)
-        sorted_indices_to_remove = sorted_scores > sorted_scores.gather_elements(1, last_ind.view(-1, 1))
+        sorted_indices_to_remove = (sorted_scores > sorted_scores.gather_elements(1, last_ind.view(-1, 1))).int()
         sorted_indices_to_remove[..., : self.min_tokens_to_keep] = 0
-        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+        indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove).bool()
 
         scores_processed = scores.masked_fill(indices_to_remove, self.filter_value)
         return scores_processed
@@ -1034,7 +1035,7 @@ class EncoderNoRepeatNGramLogitsProcessor(LogitsProcessor):
         self.generated_ngrams = _get_ngrams(encoder_ngram_size, encoder_input_ids, self.batch_size)
 
     @add_start_docstrings(LOGITS_PROCESSOR_INPUTS_DOCSTRING)
-    def __call__(self, input_ids: ms.Tensor, scores: ms.FloatTensor) -> ms.Tensor:
+    def __call__(self, input_ids: ms.Tensor, scores: ms.Tensor) -> ms.Tensor:
         # B x num_beams
         num_hypos = scores.shape[0]
         num_beams = num_hypos // self.batch_size
@@ -1729,10 +1730,10 @@ class ExponentialDecayLengthPenalty(LogitsProcessor):
         if not isinstance(eos_token_id, ms.Tensor):
             if isinstance(eos_token_id, int):
                 eos_token_id = [eos_token_id]
-            eos_token_id = ms.tensor(eos_token_id)
+            eos_token_id = ms.Tensor(eos_token_id)
         self.eos_token_id = eos_token_id
 
-        if ms.is_floating_point(eos_token_id) or (eos_token_id < 0).any():
+        if ops.is_floating_point(eos_token_id) or (eos_token_id < 0).any():
             raise ValueError(f"`eos_token_id` has to be a list of positive integers, but is {eos_token_id}")
 
     @add_start_docstrings(LOGITS_PROCESSOR_INPUTS_DOCSTRING)

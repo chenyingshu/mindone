@@ -1092,9 +1092,10 @@ class Qwen2VLPreTrainedModel(MSPreTrainedModel):
 
     def _init_weights(self, module):
         pass # initialize weights while instantialization
+        # TODO: initialize here XX.weight.set_data(init.initializer(...))
 
 
-class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel):
+class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel): # MSPreTrainedModel does not inherit Generation in later version
     config_class = Qwen2VLVisionConfig
     _no_split_modules = ["Qwen2VLVisionBlock"]
 
@@ -1124,6 +1125,7 @@ class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel):
         return self.blocks[0].mlp.fc2.weight.dtype
 
     def rot_pos_emb(self, grid_thw):
+        print("enter rot_pos_emb(grid_thw=)", grid_thw)
         pos_ids = []
         for t, h, w in grid_thw:
             hpos_ids = ops.arange(h).unsqueeze(1).broadcast_to((-1, w))
@@ -1455,7 +1457,7 @@ QWEN2_VL_INPUTS_DOCSTRING = r"""
 """
 
 
-class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): # TODO: GenerationMixin
+class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
@@ -1613,7 +1615,7 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
 
                 llm_positions = ops.cat(llm_pos_ids_list, axis=1).reshape(3, -1)
                 position_ids[..., i, attention_mask[i] == 1] = llm_positions 
-                mrope_position_deltas.append(llm_positions.max() + 1 - len(total_input_ids[i]))
+                mrope_position_deltas.append(llm_positions.max().item() + 1 - len(total_input_ids[i]))
             mrope_position_deltas = ms.Tensor(mrope_position_deltas).unsqueeze(1) 
             return position_ids, mrope_position_deltas
         else:
@@ -1690,6 +1692,7 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
         >>> from PIL import Image
         >>> import requests
         >>> from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+        >>> from mindspore import Tensor
 
         >>> model = Qwen2VLForConditionalGeneration.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
         >>> processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
@@ -1710,7 +1713,7 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
         >>> inputs = processor(text=[text], images=[image], vision_infos=[vision_infos])
 
         >>> # Generate
-        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
+        >>> generate_ids = model.generate(Tensor(inputs.input_ids), max_length=30)
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "The image shows a street scene with a red stop sign in the foreground. In the background, there is a large red gate with Chinese characters ..."
         ```"""
@@ -1725,14 +1728,14 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin): 
             inputs_embeds = self.model.embed_tokens(input_ids)
             if pixel_values is not None:
                 # pixel_values = pixel_values.type(self.visual.get_dtype()) # TODO: different from pytorch
-                pixel_values = pixel_values.type(self.visual.dtype) 
+                pixel_values = pixel_values.to(self.visual.dtype) 
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
                 image_mask = (input_ids == self.config.image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
                 image_embeds = image_embeds.to(inputs_embeds.dtype) 
                 inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
             if pixel_values_videos is not None:
-                pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
+                pixel_values_videos = pixel_values_videos.to(self.visual.dtype)
                 video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
                 video_mask = (input_ids == self.config.video_token_id).unsqueeze(-1).expand_as(inputs_embeds)
                 video_embeds = video_embeds.to(inputs_embeds.dtype)

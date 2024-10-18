@@ -38,10 +38,9 @@ model = Qwen2VLForConditionalGeneration.from_pretrained("/home/susan/workspace/c
 # )
 # print(model.visual)
 logger.info(model)
-logger.info("generation_config", model.generation_config)
+logger.info(model.generation_config)
 print("generation_config", model.generation_config)
-breakpoint()
-# exit()
+# breakpoint()
 
 print("Loading AutoProcessor")
 # default processer
@@ -90,7 +89,7 @@ text = processor.apply_chat_template(
 )
 
 print("text", text)
-breakpoint()
+# breakpoint()
 # add_special_tokens=True, split_special_tokens=True
 image_inputs, video_inputs = process_vision_info(messages) # use MS version cannot process
 print("image_inputs", image_inputs)
@@ -102,27 +101,29 @@ inputs = processor(
     padding=True,
     return_tensors="np",
 )
+print("tokenized inputs", inputs)
 # attention_mask = Tensor(inputs["attention_mask"]) #https://github.com/suno-ai/bark/issues/402
 # print(attention_mask)
 
 # Inference: Generation of the output
-generated_ids = model.generate(Tensor(inputs.input_ids), max_new_tokens=128) #dtype=ms.int64
+# TODO: to include add inputs values as input, and conver to MS Tensors
+generated_ids = model.generate(**inputs, max_new_tokens=128) #dtype=ms.int64
 print("generated_ids.shape", generated_ids.shape)
 print("generated_ids", generated_ids)
-logger.info("generated_ids.shape", generated_ids.shape)
-logger.info("generated_ids", generated_ids)
-logger.info("generation_config", model.generation_config)
+logger.info(generated_ids.shape)
+logger.info(generated_ids)
+logger.info(model.generation_config)
 print("generation_config", model.generation_config)
-breakpoint()
+# breakpoint()
 # output_text = processor.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0] # also work
 generated_ids_trimmed = [
     out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
 ]
 print("generated_ids_trimmed[0] len=", len(generated_ids_trimmed[0]))
 print("generated_ids_trimmed", generated_ids_trimmed)
-logger.info("generated_ids_trimmed0 len", len(generated_ids_trimmed[0]))
-logger.info("generated_ids_trimmed", generated_ids_trimmed)
-breakpoint()
+# logger.info("generated_ids_trimmed0 len", str(len(generated_ids_trimmed[0])))
+logger.info(generated_ids_trimmed)
+# breakpoint()
 output_text = processor.batch_decode(
     generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
 )
@@ -133,7 +134,7 @@ print("Input: %s"%str(messages))
 print("Response:", output_text[0])
 print("******** End of Test Image Understanding ********\n")
 
-
+'''
 print("*************************************************")
 print("********** Test Video Understanding *************")
 print("*************************************************")
@@ -188,3 +189,4 @@ print("*************************************************")
 print("Input: %s"%str(messages))
 print("Response:", output_text[0])
 print("******** End of Test Video Understanding ********")
+'''

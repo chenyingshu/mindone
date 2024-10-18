@@ -53,6 +53,7 @@ import mindspore as ms
 from mindspore import Tensor, nn, ops
 
 from .integrations import PeftAdapterMixin
+from .generation import GenerationMixin
 from .modeling_attn_mask_utils import dtype_to_min
 
 if is_safetensors_available():
@@ -512,7 +513,7 @@ class ModuleUtilsMixin:
         return sum(total_numel)
 
 
-class MSPreTrainedModel(nn.Cell, ModuleUtilsMixin, PushToHubMixin, PeftAdapterMixin):
+class MSPreTrainedModel(nn.Cell, ModuleUtilsMixin, GenerationMixin, PushToHubMixin, PeftAdapterMixin):
     r"""
     Base class for all models.
 
@@ -1314,6 +1315,9 @@ class MSPreTrainedModel(nn.Cell, ModuleUtilsMixin, PushToHubMixin, PeftAdapterMi
         subfolder = kwargs.pop("subfolder", "")
         commit_hash = kwargs.pop("_commit_hash", None)
         variant = kwargs.pop("variant", None)
+        
+        user_flash_attention_2 = kwargs.pop("user_flash_attention_2", False)
+        generation_config = kwargs.pop("generation_config", None)
 
         if use_auth_token is not None:
             warnings.warn(
@@ -1747,6 +1751,32 @@ class MSPreTrainedModel(nn.Cell, ModuleUtilsMixin, PushToHubMixin, PeftAdapterMi
 
         # Set model in evaluation mode to deactivate DropOut modules by default
         model.set_train(False)
+
+        # If it is a model with generation capabilities, attempt to load the generation config
+        if model.can_generate() and generation_config is not None:
+            logger.info("The user-defined `generation_config` will be used to override the default generation config.")
+            model.generation_config = model.generation_config.from_dict(generation_config.to_dict())
+        elif model.can_generate() and pretrained_model_name_or_path is not None:
+            try:
+                model.generation_config = GenerationConfig.from_pretrained(
+                    pretrained_model_name_or_path,
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    resume_download=resume_download,
+                    proxies=proxies,
+                    local_files_only=local_files_only,
+                    token=token,
+                    revision=revision,
+                    subfolder=subfolder,
+                    _from_auto=from_auto_class,
+                    _from_pipeline=from_pipeline,
+                    **kwargs,
+                )
+            except OSError:
+                logger.info(
+                    "Generation config file not found, using a generation config created from the model config."
+                )
+                pass
 
         if output_loading_info:
             if loading_info is None:
