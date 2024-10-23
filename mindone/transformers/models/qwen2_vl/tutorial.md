@@ -1,6 +1,6 @@
 # Tutorial: Qwen2-VL Implementation from Scratch <br> 从零开始实现 Qwen2-VL (MindSpore Version)
 <!-- TODO: separate doc for CN ver. -->
-<!-- [中文教程](README_CN.md)  &nbsp;&nbsp;|&nbsp;&nbsp; English Tutorial -->
+<!-- [中文教程](tutorial_CN.md)  &nbsp;&nbsp;|&nbsp;&nbsp; English Tutorial -->
 
 > This tutorial aims to re-implement Qwen2-VL based on [MindSpore](https://gitee.com/mindspore/mindspore) and [MindONE](https://github.com/mindspore-lab/mindone).
 <br> 基于 [MindSpore](https://gitee.com/mindspore/mindspore) and [MindONE](https://github.com/mindspore-lab/mindone) 实现Qwen2-VL。
@@ -8,6 +8,8 @@
 **Introduction:** Qwen2-VL is an advanced version of the [Qwen-VL](https://github.com/QwenLM/Qwen-VL) model, a large visual language model (LVLM). Key improvements include enhanced image comprehension, advanced video understanding, integrated visual agent functionality, and expanded multilingual support.
 <br>
 The model architecture has been optimized for handling arbitrary image resolutions through [Naive Dynamic Resolution](#naive-dynamic-resolution) support and utilizes [Multimodal Rotary Position Embedding (M-ROPE)](#multimodal-rotary-position-embedding-m-rope) to effectively process both 1D textual and multi-dimensional visual data. This updated model demonstrates competitive performance against leading AI systems like GPT-4o and Claude 3.5 Sonnet in vision-related tasks and ranks highly among open-source models in text capabilities. These advancements make Qwen2-VL a versatile tool for various applications requiring robust multimodal processing and reasoning abilities.
+
+**Environment requirements:** Python, Mindspore, Mindone (todo), Transformers (latest)
 
 ## 1. Framework Overview 流程概览
 Qwen2-VL adapted [ViT](https://github.com/google-research/vision_transformer#vision-transformer)'s encoder as Vision Encoder, and LLM [Qwen2](https://github.com/QwenLM/Qwen2)'s decoder as Decoder.
@@ -23,14 +25,55 @@ _Qwen2-VL architecture. Taken from [original paper](https://arxiv.org/abs/2409.1
 </div>
 
 ### Tasks 
+Qwen2-VL can support multimodal input for vision understanding.....
 
 ## 2. Model Architecture and Modules
-### 1. Model Architecture
-Here shows the architecture of the Qwen2-VL processor including image processor and tokenizer, as well as  the Qwen2-VL vision-and-text conditional generation model including vision encoder and LM decoder, taking "Qwen2-VL-7B-Instruct" as an example.
+### 2.1. Model Architecture
+Here shows the components and architecture of the Qwen2-VL processor including image processor and tokenizer, as well as  the Qwen2-VL vision-and-text conditional generation model including vision encoder and LM decoder.
+
+Taking "Qwen2-VL-7B-Instruct" as an example, Qwen2-VL contains the following components: 
+
+
+<details>
+<summary>Chat template (Qwen's chatml format) </summary>
+Convert the user input messsage into specific chatting template format (Qwen's chatml).
+
+This step of chat template loading would be implemented by Processor's tokenizer.
+For example:
+```python
+from transformers import AutoTokenizer
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
+messages=[{
+            "role": "user", 
+            "content": [
+                {
+                    "type": "image",
+                    "image": "PATH",
+                },
+                {
+                    "type": "text",
+                    "text": "Describe this image."
+                }],
+        }]
+text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+# <|im_start|>system\n
+# You are a helpful assistant.<|im_end|>\n
+# <|im_start|>user\n
+# <|vision_start|><|image_pad|><|vision_end|>Describe this image.<|im_end|>\n
+# <|im_start|>assistant\n
+```
+</details>
+
+<details>
+<summary>Image processor (Qwen2VLImageProcessor) </summary>
+Preprocess input visual inputs into specific format that model can handle.
+</details>
 
 <details>
 <summary>Model (visual: vision encoder; model: LM decoder)</summary>
 
+- ``Qwen2VisionTransformerPretrainedModel``: vision model, with vision input embeddings
+- ``Qwen2VLModel``: language model, generate response 
 
 ```python
 Qwen2VLForConditionalGeneration<
@@ -97,6 +140,9 @@ Qwen2VLForConditionalGeneration<
 <details>
 <summary>Processor (image processor; tokenizer)</summary>
 
+- ``image_processor(Qwen2VLImageProcessor)``: handle input inputs
+- ``tokenizer(Qwen2TokenizerFast)``: handle input text prompts, and placeholder vision tokens
+
 ```json
 Qwen2VLProcessor:
 - image_processor: Qwen2VLImageProcessor {
@@ -158,11 +204,11 @@ The Qwen2-VL model (Qwen2VLForConditionalGeneration) include a ViT encoder (Qwen
 <br>
 Refer to [Position IDs](#position-ids) for details of ```get_rope_index()```.
 <br>
-Refer to [Visual Encoder](#2-visual-encoder) for detail of encoder
+Refer to [Visual Encoder](#22-visual-encoder) for detail of encoder
 <br>
-Refer to [LM decoder](#3-lm-decoder) for detail of decoder.
+Refer to [LM decoder](#23-lm-decoder) for detail of decoder.
 <br>
-Refer to []() for input ID generation
+Refer to [IDs&tokens Generation](#input-ids-and-tokens-generation) for input IDs and tokens generation.
 <br>
 Running example in [Inference](#3-inference-pipelines).
 
@@ -268,17 +314,29 @@ class Qwen2VLForConditionalGeneration():
 ```
 
 
-#### Input IDs Generation
-Generate input ids from embeddings. TODO...
+#### Input IDs and tokens Generation
+Generate input IDs and tokens from inputs by tokenizer and generate().
+
+Generate input IDs (``input_ids``), e.g.:
 ```python
 # transformers/src/transformers/models/qwen2/tokenization_qwen2_fast.py
 from transformers import Qwen2TokenizerFast
-
 tokenizer = Qwen2TokenizerFast.from_pretrained("Qwen/Qwen-tokenizer")
 tokenizer("Hello world")["input_ids"]
 # [9707, 1879]
 tokenizer(" Hello world")["input_ids"]
 # [21927, 1879]
+```
+
+Text token generation (``generation_output``), e.g.: please refer to "mindone.transformers.generation" folder for more details.
+```python
+# mindone.transformers.MSGenerationMixin.generate()
+from mindspore import Tensor
+model = Qwen2VLForConditionalGeneration.from_pretrained("Qwen/Qwen2-VL-2B-Instruct")
+inputs = tokenizer("Hello world", return_tensors="np") 
+# {'input_ids': array([[9707, 1879]]), 'attention_mask': array([[1,1]])}
+generation_output = model.generate(Tensor(inputs.input_ids)) # generated sequences of tokens
+# Tensor(shape=[1, 20], dtype=Int64, value=[[9707, 1879, 0 ... 8405, 315, 279]])
 ```
 
 ### Naive Dynamic Resolution
@@ -667,7 +725,7 @@ class Qwen2VisionTransformerPretrainedModel:
         return rotary_pos_emb
 ```
 
-### 2. Visual Encoder
+### 2.2. Visual Encoder
 <!-- #### Revisit Vision Transformer (ViT)
 
 <div style="display: block; margin-left: auto;  margin-right: auto; width:80%" >
@@ -954,7 +1012,7 @@ class PatchMerger(nn.Cell):
 ```
 
 
-### 3. LM Decoder
+### 2.3. LM Decoder
 ```python
 class Qwen2VLModel(Qwen2VLPreTrainedModel):
     def __init__(self, config: Qwen2VLConfig):
@@ -1143,7 +1201,7 @@ class Qwen2VLDecoderLayer(nn.Cell):
         return outputs
 ```
 
-### 4. [Optional] Vision Preprocessing
+### 2.4. [Optional] Vision Preprocessing
 Convert all images or video frames into a list of Pillow Image.
 Can downsample total frames by setting smaller FPS (i.e., 'fps' in config). 
 For example, for a video with 24FPS, total 1200 frame, with new 1 FPS. We can get a list of 
