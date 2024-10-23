@@ -1,0 +1,21 @@
+export DEVICE_ID=0
+python opensora/sample/sample_v1_3.py \ 
+    --model_path LanguageBind/Open-Sora-Plan-v1.3.0/any93x640x640 \
+    --version v1_3 \
+    --num_frames 93 \
+    --height 352 \
+    --width 640 \
+    --cache_dir "./" \
+    --text_encoder_name_1 google/mt5-xxl \
+    --text_prompt examples/sora_refine.txt \
+    --ae WFVAEModel_D8_4x8x8 \
+    --ae_path LanguageBind/Open-Sora-Plan-v1.3.0/vae \ 
+    --save_img_path "./sample_videos/prompt_list_0_93x640" \
+    --fps 18 \
+    --guidance_scale 7.5 \
+    --num_sampling_steps 100 \
+    --max_sequence_length 512 \
+    --sample_method EulerAncestralDiscrete \
+    --num_samples_per_prompt 1 \
+    --rescale_betas_zero_snr \
+    --prediction_type "v_prediction"

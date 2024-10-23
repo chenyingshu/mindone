@@ -21,7 +21,7 @@ from opensora.models import CausalVAEModelWrapper
 from opensora.models.causalvideovae import ae_channel_config, ae_stride_config
 from opensora.models.causalvideovae.model.modules.updownsample import TrilinearInterpolate
 from opensora.models.diffusion import Diffusion_models
-from opensora.models.diffusion.opensora.modules import Attention, LayerNorm
+from examples.opensora_pku.opensora.models.diffusion.opensora.modules_v1_2 import Attention, LayerNorm #TODO: to v1.3
 from opensora.models.diffusion.opensora.net_with_loss import DiffusionWithLoss, DiffusionWithLossEval
 from opensora.train.commons import create_loss_scaler, parse_args
 from opensora.utils.callbacks import EMAEvalSwapCallback, PerfRecorderCallback

@@ -22,7 +22,7 @@ from opensora.acceleration.parallel_states import get_sequence_parallel_state, h
 from opensora.dataset.text_dataset import create_dataloader
 from opensora.models.causalvideovae import CausalVAEModelWrapper, ae_stride_config
 from opensora.models.causalvideovae.model.modules.updownsample import TrilinearInterpolate
-from opensora.models.diffusion.opensora.modeling_opensora import LayerNorm, OpenSoraT2V
+from opensora.models.diffusion.opensora.modeling_opensora_v1_2 import LayerNorm, OpenSoraT2V
 from opensora.models.diffusion.opensora.modules import Attention
 from opensora.sample.pipeline_opensora import OpenSoraPipeline
 from opensora.utils.message_utils import print_banner
