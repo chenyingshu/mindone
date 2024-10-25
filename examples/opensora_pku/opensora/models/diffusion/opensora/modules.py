@@ -18,131 +18,6 @@ from .rope import PositionGetter3D, RoPE3D
 
 logger = logging.getLogger(__name__)
 
-
-# Positional Embeddings
-def get_3d_sincos_pos_embed(
-    embed_dim,
-    grid_size,
-    cls_token=False,
-    extra_tokens=0,
-    interpolation_scale=1.0,
-    base_size=16,
-):
-    """
-    grid_size: int of the grid height and width return: pos_embed: [grid_size*grid_size, embed_dim] or
-    [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
-    """
-    # if isinstance(grid_size, int):
-    #     grid_size = (grid_size, grid_size)
-    grid_t = np.arange(grid_size[0], dtype=np.float32) / (grid_size[0] / base_size[0]) / interpolation_scale[0]
-    grid_h = np.arange(grid_size[1], dtype=np.float32) / (grid_size[1] / base_size[1]) / interpolation_scale[1]
-    grid_w = np.arange(grid_size[2], dtype=np.float32) / (grid_size[2] / base_size[2]) / interpolation_scale[2]
-    grid = np.meshgrid(grid_w, grid_h, grid_t)  # here w goes first
-    grid = np.stack(grid, axis=0)
-
-    grid = grid.reshape([3, 1, grid_size[2], grid_size[1], grid_size[0]])
-    pos_embed = get_3d_sincos_pos_embed_from_grid(embed_dim, grid)
-
-    if cls_token and extra_tokens > 0:
-        pos_embed = np.concatenate([np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0)
-    return pos_embed
-
-
-def get_3d_sincos_pos_embed_from_grid(embed_dim, grid):
-    if embed_dim % 3 != 0:
-        raise ValueError("embed_dim must be divisible by 3")
-
-    # use 1/3 of dimensions to encode grid_t/h/w
-    emb_t = get_1d_sincos_pos_embed_from_grid(embed_dim // 3, grid[0])  # (T*H*W, D/3)
-    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 3, grid[1])  # (T*H*W, D/3)
-    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 3, grid[2])  # (T*H*W, D/3)
-
-    emb = np.concatenate([emb_t, emb_h, emb_w], axis=1)  # (T*H*W, D)
-    return emb
-
-
-def get_2d_sincos_pos_embed(
-    embed_dim,
-    grid_size,
-    cls_token=False,
-    extra_tokens=0,
-    interpolation_scale=1.0,
-    base_size=16,
-):
-    """
-    grid_size: int of the grid height and width return: pos_embed: [grid_size*grid_size, embed_dim] or
-    [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
-    """
-    # if isinstance(grid_size, int):
-    #     grid_size = (grid_size, grid_size)
-
-    grid_h = np.arange(grid_size[0], dtype=np.float32) / (grid_size[0] / base_size[0]) / interpolation_scale[0]
-    grid_w = np.arange(grid_size[1], dtype=np.float32) / (grid_size[1] / base_size[1]) / interpolation_scale[1]
-    grid = np.meshgrid(grid_w, grid_h)  # here w goes first
-    grid = np.stack(grid, axis=0)
-
-    grid = grid.reshape([2, 1, grid_size[1], grid_size[0]])
-    pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
-    if cls_token and extra_tokens > 0:
-        pos_embed = np.concatenate([np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0)
-    return pos_embed
-
-
-def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
-    if embed_dim % 2 != 0:
-        raise ValueError("embed_dim must be divisible by 2")
-
-    # use 1/3 of dimensions to encode grid_t/h/w
-    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])  # (H*W, D/2)
-    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])  # (H*W, D/2)
-
-    emb = np.concatenate([emb_h, emb_w], axis=1)  # (H*W, D)
-    return emb
-
-
-def get_1d_sincos_pos_embed(
-    embed_dim,
-    grid_size,
-    cls_token=False,
-    extra_tokens=0,
-    interpolation_scale=1.0,
-    base_size=16,
-):
-    """
-    grid_size: int of the grid return: pos_embed: [grid_size, embed_dim] or
-    [1+grid_size, embed_dim] (w/ or w/o cls_token)
-    """
-    # if isinstance(grid_size, int):
-    #     grid_size = (grid_size, grid_size)
-
-    grid = np.arange(grid_size, dtype=np.float32) / (grid_size / base_size) / interpolation_scale
-    pos_embed = get_1d_sincos_pos_embed_from_grid(embed_dim, grid)  # (H*W, D/2)
-    if cls_token and extra_tokens > 0:
-        pos_embed = np.concatenate([np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0)
-    return pos_embed
-
-
-def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
-    """
-    embed_dim: output dimension for each position pos: a list of positions to be encoded: size (M,) out: (M, D)
-    """
-    if embed_dim % 2 != 0:
-        raise ValueError("embed_dim must be divisible by 2")
-
-    omega = np.arange(embed_dim // 2, dtype=np.float64)
-    omega /= embed_dim / 2.0
-    omega = 1.0 / 10000**omega  # (D/2,)
-
-    pos = pos.reshape(-1)  # (M,)
-    out = np.einsum("m,d->md", pos, omega)  # (M, D/2), outer product
-
-    emb_sin = np.sin(out)  # (M, D/2)
-    emb_cos = np.cos(out)  # (M, D/2)
-
-    emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
-    return emb
-
-
 class LayerNorm(nn.Cell):
     def __init__(self, normalized_shape, eps=1e-5, elementwise_affine: bool = True, dtype=ms.float32):
         super().__init__()
@@ -155,163 +30,45 @@ class LayerNorm(nn.Cell):
             self.gamma = Parameter(initializer("ones", normalized_shape, dtype=dtype))
             self.beta = Parameter(initializer("zeros", normalized_shape, dtype=dtype))
         else:
-            self.gamma = ops.ones(normalized_shape, dtype=dtype)
-            self.beta = ops.zeros(normalized_shape, dtype=dtype)
+            self.gamma = mint.ones(normalized_shape, dtype=dtype)
+            self.beta = mint.zeros(normalized_shape, dtype=dtype)
         self.layer_norm = ops.LayerNorm(-1, -1, epsilon=eps)
 
     def construct(self, x: ms.Tensor):
         x, _, _ = self.layer_norm(x, self.gamma, self.beta)
         return x
 
-
+# Different from v1.2
 class PatchEmbed2D(nn.Cell):
-    """2D Image to Patch Embedding but with 3D positional embedding"""
+    """2D Image to Patch Embedding but with video"""
 
     def __init__(
         self,
-        num_frames=1,
-        height=224,
-        width=224,
-        patch_size_t=1,
-        patch_size=16,
-        in_channels=3,
-        embed_dim=768,
-        layer_norm=False,
-        flatten=True,
+        patch_size=16, #2
+        in_channels=3, #8
+        embed_dim=768, # 24*96=2304
         bias=True,
-        interpolation_scale=(1, 1),
-        interpolation_scale_t=1,
-        use_abs_pos=True,
     ):
         super().__init__()
-        # assert num_frames == 1
-        self.use_abs_pos = use_abs_pos
-        self.flatten = flatten
-        self.layer_norm = layer_norm
-        self.embed_dim = embed_dim
-
         self.proj = nn.Conv2d(
-            in_channels, embed_dim, kernel_size=(patch_size, patch_size), stride=(patch_size, patch_size), has_bias=bias
+            in_channels, embed_dim, 
+            kernel_size=(patch_size, patch_size), stride=(patch_size, patch_size), has_bias=bias
         )
-        if layer_norm:
-            self.norm = LayerNorm(embed_dim, elementwise_affine=False, eps=1e-6)
-        else:
-            self.norm = None
-        self.patch_size_t = patch_size_t
-        self.patch_size = patch_size
-        # See:
-        # https://github.com/PixArt-alpha/PixArt-alpha/blob/0f55e922376d8b797edd44d25d0e7464b260dcab/diffusion/model/nets/PixArtMS.py#L161
-        self.height, self.width = height // patch_size, width // patch_size
-        self.base_size = (height // patch_size, width // patch_size)
-        self.interpolation_scale = (interpolation_scale[0], interpolation_scale[1])
-        pos_embed = get_2d_sincos_pos_embed(
-            embed_dim, (self.height, self.width), base_size=self.base_size, interpolation_scale=self.interpolation_scale
-        )
-        self.pos_embed = ms.Tensor(pos_embed).float().unsqueeze(0)
-        self.num_frames = (num_frames - 1) // patch_size_t + 1 if num_frames % 2 == 1 else num_frames // patch_size_t
-        self.base_size_t = (num_frames - 1) // patch_size_t + 1 if num_frames % 2 == 1 else num_frames // patch_size_t
-        self.interpolation_scale_t = interpolation_scale_t
 
-        if get_sequence_parallel_state():
-            self.sp_size = hccl_info.world_size
-            rank_offset = hccl_info.rank % hccl_info.world_size
-            num_frames = (self.num_frames + self.sp_size - 1) // self.sp_size * self.sp_size
-            temp_pos_embed = get_1d_sincos_pos_embed(
-                embed_dim, num_frames, base_size=self.base_size_t, interpolation_scale=self.interpolation_scale_t
-            )
-            num_frames //= self.sp_size
-            self.temp_pos_st = rank_offset * num_frames
-            self.temp_pos_ed = (rank_offset + 1) * num_frames
-        else:
-            temp_pos_embed = get_1d_sincos_pos_embed(
-                embed_dim, self.num_frames, base_size=self.base_size_t, interpolation_scale=self.interpolation_scale_t
-            )
-
-        self.temp_pos_embed = ms.Tensor(temp_pos_embed).float().unsqueeze(0)
-
-    def construct(self, latent, num_frames):
+    def construct(self, latent):
         b, c, t, h, w = latent.shape
-        video_latent, image_latent = None, None
-        height, width = latent.shape[-2] // self.patch_size, latent.shape[-1] // self.patch_size
+        print("PatchEmbed2D construct()")
+        print("latent.shape", latent.shape)
         # b c t h w -> (b t) c h w
-        latent = latent.swapaxes(1, 2).reshape(b * t, c, h, w)
-
+        latent = latent.permute(0, 2, 1, 3, 4).reshape(b*t, c, h, w)
+        print("latent.shape", latent.shape)
         latent = self.proj(latent)
-        if self.flatten:
-            latent = latent.flatten(start_dim=2).permute(0, 2, 1)  # BCHW -> BNC
-        if self.layer_norm:
-            latent = self.norm(latent)
-
-        if self.use_abs_pos:
-            # Interpolate positional embeddings if needed.
-            # (For PixArt-Alpha: https://github.com/PixArt-alpha/\
-            # PixArt-alpha/blob/0f55e922376d8b797edd44d25d0e7464b260dcab/diffusion/model/nets/PixArtMS.py#L162C151-L162C160)
-            if self.height != height or self.width != width:
-                # raise NotImplementedError
-                pos_embed = get_2d_sincos_pos_embed(
-                    embed_dim=self.pos_embed.shape[-1],
-                    grid_size=(height, width),
-                    base_size=self.base_size,
-                    interpolation_scale=self.interpolation_scale,
-                )
-                pos_embed = ms.Tensor(pos_embed)
-                pos_embed = pos_embed.float().unsqueeze(0)
-            else:
-                pos_embed = self.pos_embed
-
-            if self.num_frames != num_frames:
-                if get_sequence_parallel_state():
-                    # f, h -> f, 1, h
-                    temp_pos_embed = self.temp_pos_embed[self.temp_pos_st : self.temp_pos_ed].unsqueeze(1)
-                else:
-                    temp_pos_embed = get_1d_sincos_pos_embed(
-                        embed_dim=self.temp_pos_embed.shape[-1],
-                        grid_size=num_frames,
-                        base_size=self.base_size_t,
-                        interpolation_scale=self.interpolation_scale_t,
-                    )
-                temp_pos_embed = ms.Tensor(temp_pos_embed)
-                temp_pos_embed = temp_pos_embed.float().unsqueeze(0)
-            else:
-                temp_pos_embed = self.temp_pos_embed
-
-            latent = (latent + pos_embed).to(latent.dtype)
-
-        # (b t) n c -> b t n c
-        latent = latent.reshape(b, t, -1, self.embed_dim)
-        video_latent, image_latent = latent[:, :num_frames], latent[:, num_frames:]
-
-        if self.use_abs_pos:
-            # temp_pos_embed = temp_pos_embed.unsqueeze(2) * self.temp_embed_gate.tanh()
-            temp_pos_embed = temp_pos_embed.unsqueeze(2)
-            video_latent = (
-                (video_latent + temp_pos_embed).to(video_latent.dtype)
-                if video_latent is not None and video_latent.numel() > 0
-                else None
-            )
-            image_latent = (
-                (image_latent + temp_pos_embed[:, :1]).to(image_latent.dtype)
-                if image_latent is not None and image_latent.numel() > 0
-                else None
-            )
-        # 'b t n c -> b (t n) c'
-        video_latent = (
-            video_latent.reshape(b, -1, self.embed_dim)
-            if video_latent is not None and video_latent.numel() > 0
-            else None
-        )
-        # 'b t n c -> (b t) n c'
-        image_latent = (
-            image_latent.reshape(b * t, -1, self.embed_dim)
-            if image_latent is not None and image_latent.numel() > 0
-            else None
-        )
-
-        if num_frames == 1 and image_latent is None and not get_sequence_parallel_state():
-            image_latent = video_latent
-            video_latent = None
-
-        return video_latent, image_latent
+        print("latent.shape", latent.shape)
+        # (b t) c h w -> b (t h w) c
+        _, c, h, w = latent.shape
+        latent = latent.reshape(b, -1, c, h, w).permute(0, 1, 3, 4, 2).reshape(b, -1, c)
+        print("latent.shape", latent.shape)
+        return latent
 
 
 def get_attention_mask(attention_mask, repeat_num, attention_mode="xformers"):
@@ -326,7 +83,7 @@ def get_attention_mask(attention_mask, repeat_num, attention_mode="xformers"):
 class Attention(Attention_):
     def __init__(
             self, interpolation_scale_thw, sparse1d, sparse_n, 
-            sparse_group, is_cross_attn, attention_mode, **kwags
+            sparse_group, is_cross_attn, attention_mode="xformers", **kwags
             ):
         FA_dtype = kwags.pop("FA_dtype", ms.bfloat16)
         processor = OpenSoraAttnProcessor2_0(
@@ -351,7 +108,7 @@ class Attention(Attention_):
         else:
             pad_len = sparse_n * sparse_n - l % (sparse_n * sparse_n)
 
-        attention_mask_sparse = ops.pad(attention_mask, (0, pad_len, 0, 0), mode="constant", value=-9980.0)
+        attention_mask_sparse = mint.nn.functional.pad(attention_mask, (0, pad_len, 0, 0), mode="constant", value=-9980.0)
         b = attention_mask_sparse.shape[0]
         k = sparse_n
         m = sparse_n
@@ -359,7 +116,7 @@ class Attention(Attention_):
         attention_mask_sparse_1d = attention_mask_sparse.reshape(b, 1, 1, -1, k).permute(4, 0, 1, 2, 3).reshape(b*k, 1, 1, -1)
         # b 1 1 (n m k) -> (m b) 1 1 (n k)
         attention_mask_sparse_1d_group = attention_mask_sparse.reshape(b, 1, 1, -1, m, k).permute(4, 0, 1, 2, 3, 5).reshape(m*b, 1, 1, -1)
-        encoder_attention_mask_sparse = encoder_attention_mask.repeat(sparse_n, 1, 1, 1)
+        encoder_attention_mask_sparse = encoder_attention_mask.tile((sparse_n, 1, 1, 1))
         # if npu_config is not None:
         attention_mask_sparse_1d = get_attention_mask(
             attention_mask_sparse_1d, attention_mask_sparse_1d.shape[-1]
@@ -413,7 +170,7 @@ class Attention(Attention_):
         current_length: int = attention_mask.shape[-1]
         if current_length != target_length:
             print(f'attention_mask.shape, {attention_mask.shape}, current_length, {current_length}, target_length, {target_length}')
-            attention_mask = ops.pad(attention_mask, (0, target_length), mode="constant", value=0.0)
+            attention_mask = mint.nn.functional.pad(attention_mask, (0, target_length), mode="constant", value=0.0)
 
         if out_dim == 3:
             if attention_mask.shape[0] < batch_size * head_size:
@@ -443,7 +200,7 @@ class OpenSoraAttnProcessor2_0:
         
         self._init_rope(interpolation_scale_thw, dim_head=dim_head)
 
-        self.attention_mode = "xformers" 
+        self.attention_mode = "xformers"  #TBD
         # Currently we only support setting attention_mode to `flash` or `math`
         assert self.attention_mode in [
             "xformers",
@@ -502,9 +259,9 @@ class OpenSoraAttnProcessor2_0:
         value = value.view(Bs, key_tokens, heads, -1)
         # Head dimension is checked in Attention.set_use_memory_efficient_attention_xformers. We maybe pad on head_dim.
         if attn.head_dim_padding > 0:
-            query_padded = ops.pad(query, (0, attn.head_dim_padding), mode="constant", value=0.0)
-            key_padded = ops.pad(key, (0, attn.head_dim_padding), mode="constant", value=0.0)
-            value_padded = ops.pad(value, (0, attn.head_dim_padding), mode="constant", value=0.0)
+            query_padded = mint.nn.functional.pad(query, (0, attn.head_dim_padding), mode="constant", value=0.0)
+            key_padded = mint.nn.functional.pad(key, (0, attn.head_dim_padding), mode="constant", value=0.0)
+            value_padded = mint.nn.functional.pad(value, (0, attn.head_dim_padding), mode="constant", value=0.0)
         else:
             query_padded, key_padded, value_padded = query, key, value
         flash_attn = ops.operations.nn_ops.FlashAttentionScore(
@@ -564,10 +321,10 @@ class OpenSoraAttnProcessor2_0:
             assert attention_mask.shape[1] == 1
             attention_mask = attention_mask.repeat_interleave(_head_size, 1)
             attention_mask = attention_mask.reshape(-1, attention_mask.shape[-2], attention_mask.shape[-1])
-            attention_mask = ops.zeros(attention_mask.shape).masked_fill(attention_mask.to(ms.bool_), -10000.0)
+            attention_mask = mint.zeros(attention_mask.shape).masked_fill(attention_mask.to(ms.bool_), -10000.0)
 
         attention_probs = attn.get_attention_scores(query, key, attention_mask)
-        hidden_states = ops.bmm(attention_probs, value)
+        hidden_states = mint.bmm(attention_probs, value)
         hidden_states = self._batch_to_head_dim(_head_size, hidden_states)
         return hidden_states
 
@@ -581,7 +338,7 @@ class OpenSoraAttnProcessor2_0:
         if l % (self.sparse_n * self.sparse_n) != 0:
             pad_len = self.sparse_n * self.sparse_n - l % (self.sparse_n * self.sparse_n)
         if pad_len != 0:
-            x = ops.pad(x, (0, 0, 0, 0, 0, pad_len), mode="constant", value=0.0)
+            x = mint.nn.functional.pad(x, (0, 0, 0, 0, 0, pad_len), mode="constant", value=0.0)
         
         _, b, d = x.shape
         if not self.sparse_group:
@@ -749,6 +506,7 @@ class BasicTransformerBlock(nn.Cell):
         sparse1d: bool = False,
         sparse_n: int = 2,
         sparse_group: bool = False,
+        attention_mode: str = "xformers",
         FA_dtype=ms.bfloat16,
     ):
         super().__init__()
@@ -772,6 +530,7 @@ class BasicTransformerBlock(nn.Cell):
             sparse_n=sparse_n,
             sparse_group=sparse_group,
             is_cross_attn=False,
+            attention_mode=attention_mode,
             FA_dtype=self.FA_dtype,
         )
 
@@ -792,6 +551,7 @@ class BasicTransformerBlock(nn.Cell):
             sparse_n=sparse_n,
             sparse_group=sparse_group,
             is_cross_attn=True,
+            attention_mode=attention_mode,
             FA_dtype=self.FA_dtype,
         )  # is self-attn if encoder_hidden_states is none
 

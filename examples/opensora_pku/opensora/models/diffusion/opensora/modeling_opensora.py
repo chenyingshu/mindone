@@ -51,6 +51,7 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
         sparse1d: bool = False,
         sparse_n: int = 2,
         
+        attention_mode: str = "xformers", #NEW
         use_recompute=False, #NEW
         FA_dtype=ms.bfloat16, #NEW
         num_no_recompute: int = 0, #NEW
@@ -62,6 +63,7 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
         self.gradient_checkpointing = use_recompute #NEW
         self.use_recompute = use_recompute #NEW
         self.FA_dtype = FA_dtype #NEW
+        self.attention_mode = attention_mode #NEW
         self._init_patched_inputs()
 
     def _init_patched_inputs(self):
@@ -107,7 +109,7 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
             ]
         )
         self.norm_out = LayerNorm(self.config.hidden_size, elementwise_affine=False, eps=1e-6)
-        self.scale_shift_table = nn.Parameter(ops.randn((2, self.config.hidden_size)) / self.config.hidden_size**0.5)
+        self.scale_shift_table = ms.Parameter(ops.randn((2, self.config.hidden_size)) / self.config.hidden_size**0.5)
         self.proj_out = nn.Dense(
             self.config.hidden_size, self.config.patch_size_t * self.config.patch_size * self.config.patch_size * self.out_channels
         )
@@ -251,7 +253,7 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
     
     def get_attention_mask(self, attention_mask):
         if attention_mask is not None:
-            if self.config.attention_mode != "math":
+            if self.attention_mode != "math":
                 attention_mask = attention_mask.to(ms.bool_)
         return attention_mask
 
@@ -372,8 +374,10 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
             timestep, added_cond_kwargs, batch_size=batch_size, hidden_dtype=self.dtype
         )  # b 6d, b d
 
-        encoder_hidden_states = self.caption_projection(encoder_hidden_states)  # b, 1, l, d or b, 1, l, d
-        assert encoder_hidden_states.shape[1] == 1
+        print("encoder_hidden_states.shape before cap proj", encoder_hidden_states.shape)
+        encoder_hidden_states = self.caption_projection(encoder_hidden_states)  # b, 1, l, d
+        print("encoder_hidden_states.shape after cap proj", encoder_hidden_states.shape)
+        # assert encoder_hidden_states.shape[1] == 1, f'encoder_hidden_states.shape is {encoder_hidden_states}'
         # b 1 l d -> (b 1) l d
         encoder_hidden_states = encoder_hidden_states.reshape(-1, encoder_hidden_states.shape[-2], encoder_hidden_states.shape[-1])
 
