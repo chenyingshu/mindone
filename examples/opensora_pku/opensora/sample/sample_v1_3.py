@@ -27,7 +27,7 @@ from opensora.models.causalvideovae import ae_stride_config, CausalVAEModelWrapp
 # from opensora.sample.caption_refiner import OpenSoraCaptionRefiner #TODO
 from opensora.models.causalvideovae.model.modules.updownsample import TrilinearInterpolate
 from examples.opensora_pku.opensora.models.diffusion.opensora.modeling_opensora import LayerNorm, OpenSoraT2V_v1_3
-from examples.opensora_pku.opensora.models.diffusion.opensora.modules_v1_2 import Attention
+from examples.opensora_pku.opensora.models.diffusion.opensora.modules import Attention
 from opensora.sample.pipeline_opensora import OpenSoraPipeline
 
 from mindone.diffusers.models.embeddings import PixArtAlphaCombinedTimestepSizeEmbeddings
@@ -274,39 +274,39 @@ def prepare_pipeline(args):
         print("To decode latents, skipped loading text endoers and transformer")
         return vae
     
-    # Build text encoders
-    print_banner("text encoder init")
-    text_encoder_dtype = get_precision(args.text_encoder_precision)
-    if 'mt5' in args.text_encoder_name_1:
-        text_encoder_1, loading_info = MT5EncoderModel.from_pretrained(
-            args.text_encoder_name_1, 
-            cache_dir=args.cache_dir, 
-            output_loading_info=True,
-            mindspore_dtype=text_encoder_dtype,
-            use_safetensors=True
-            )      
-        loading_info.pop("unexpected_keys")  # decoder weights are ignored
-        logger.info(loading_info)
-        text_encoder_1 = text_encoder_1.set_train(False)  
-    else:
-        text_encoder_1 = T5EncoderModel.from_pretrained(
-            args.text_encoder_name_1, cache_dir=args.cache_dir, 
-            mindspore_dtype=text_encoder_dtype
-            ).set_train(False)
-    tokenizer_1 = AutoTokenizer.from_pretrained(
-        args.text_encoder_name_1, cache_dir=args.cache_dir
-        )
+    # # Build text encoders
+    # print_banner("text encoder init")
+    # text_encoder_dtype = get_precision(args.text_encoder_precision)
+    # if 'mt5' in args.text_encoder_name_1:
+    #     text_encoder_1, loading_info = MT5EncoderModel.from_pretrained(
+    #         args.text_encoder_name_1, 
+    #         cache_dir=args.cache_dir, 
+    #         output_loading_info=True,
+    #         mindspore_dtype=text_encoder_dtype,
+    #         use_safetensors=True
+    #         )      
+    #     loading_info.pop("unexpected_keys")  # decoder weights are ignored
+    #     logger.info(loading_info)
+    #     text_encoder_1 = text_encoder_1.set_train(False)  
+    # else:
+    #     text_encoder_1 = T5EncoderModel.from_pretrained(
+    #         args.text_encoder_name_1, cache_dir=args.cache_dir, 
+    #         mindspore_dtype=text_encoder_dtype
+    #         ).set_train(False)
+    # tokenizer_1 = AutoTokenizer.from_pretrained(
+    #     args.text_encoder_name_1, cache_dir=args.cache_dir
+    #     )
 
-    if args.text_encoder_name_2 is not None:
-        text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
-            args.text_encoder_name_2, cache_dir=args.cache_dir, 
-            mindspore_dtype=text_encoder_dtype
-            ).set_train(False)
-        tokenizer_2 = AutoTokenizer.from_pretrained(
-            args.text_encoder_name_2, cache_dir=args.cache_dir
-            )
-    else:
-        text_encoder_2, tokenizer_2 = None, None
+    # if args.text_encoder_name_2 is not None:
+    #     text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+    #         args.text_encoder_name_2, cache_dir=args.cache_dir, 
+    #         mindspore_dtype=text_encoder_dtype
+    #         ).set_train(False)
+    #     tokenizer_2 = AutoTokenizer.from_pretrained(
+    #         args.text_encoder_name_2, cache_dir=args.cache_dir
+    #         )
+    # else:
+    #     text_encoder_2, tokenizer_2 = None, None
 
     # Build transformer
     print_banner("transformer model init")
@@ -401,7 +401,41 @@ def prepare_pipeline(args):
     transformer_model = transformer_model.set_train(False)
     for param in transformer_model.get_parameters():  # freeze transformer_model
         param.requires_grad = False
+    print("transformer_model.config", transformer_model.config)
 
+    # Build text encoders
+    print_banner("text encoder init")
+    text_encoder_dtype = get_precision(args.text_encoder_precision)
+    if 'mt5' in args.text_encoder_name_1:
+        text_encoder_1, loading_info = MT5EncoderModel.from_pretrained(
+            args.text_encoder_name_1, 
+            cache_dir=args.cache_dir, 
+            output_loading_info=True,
+            mindspore_dtype=text_encoder_dtype,
+            use_safetensors=True
+            )      
+        loading_info.pop("unexpected_keys")  # decoder weights are ignored
+        logger.info(loading_info)
+        text_encoder_1 = text_encoder_1.set_train(False)  
+    else:
+        text_encoder_1 = T5EncoderModel.from_pretrained(
+            args.text_encoder_name_1, cache_dir=args.cache_dir, 
+            mindspore_dtype=text_encoder_dtype
+            ).set_train(False)
+    tokenizer_1 = AutoTokenizer.from_pretrained(
+        args.text_encoder_name_1, cache_dir=args.cache_dir
+        )
+
+    if args.text_encoder_name_2 is not None:
+        text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+            args.text_encoder_name_2, cache_dir=args.cache_dir, 
+            mindspore_dtype=text_encoder_dtype
+            ).set_train(False)
+        tokenizer_2 = AutoTokenizer.from_pretrained(
+            args.text_encoder_name_2, cache_dir=args.cache_dir
+            )
+    else:
+        text_encoder_2, tokenizer_2 = None, None
 
     # Build scheduler
     scheduler = get_scheduler(args)

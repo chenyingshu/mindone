@@ -17,7 +17,7 @@ from mindone.diffusers.models.modeling_utils import ModelMixin, load_state_dict
 from mindone.diffusers.models.normalization import AdaLayerNormSingle
 from mindone.diffusers.utils import SAFETENSORS_WEIGHTS_NAME, WEIGHTS_NAME, _add_variant, _get_model_file, deprecate
 
-from .modules import BasicTransformerBlock, LayerNorm, Attention, PatchEmbed2D
+from examples.opensora_pku.opensora.models.diffusion.opensora.modules import BasicTransformerBlock, LayerNorm, Attention, PatchEmbed2D
 
 class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
     _supports_gradient_checkpointing = True
@@ -78,13 +78,12 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
         self.caption_projection = PixArtAlphaTextProjection(
             in_features=self.config.caption_channels, hidden_size=self.config.hidden_size
         )
-
+        
         self.pos_embed = PatchEmbed2D(
             patch_size=self.config.patch_size,
             in_channels=self.config.in_channels,
             embed_dim=self.config.hidden_size,
         )
-        
         self.transformer_blocks = nn.CellList(
             [
                 BasicTransformerBlock(
@@ -312,14 +311,15 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
             hidden_states, encoder_hidden_states, timestep, batch_size, frame
         )
 
-        # To
-        # x            (t*h*w b d) or (t//sp*h*w b d)
-        # cond_1       (l b d) or (l//sp b d)
-        # b s h -> s b h
-        hidden_states = hidden_states.swapaxes(0, 1).contiguous()
-        # b s h -> s b h
-        encoder_hidden_states = encoder_hidden_states.swapaxes(0,1).contiguous()
-        timestep = timestep.view(batch_size, 6, -1).transpose(0, 1).contiguous()
+        if get_sequence_parallel_state():
+            # To
+            # x            (t*h*w b d) or (t//sp*h*w b d)
+            # cond_1       (l b d) or (l//sp b d)
+            # b s h -> s b h
+            hidden_states = hidden_states.swapaxes(0, 1).contiguous()
+            # b s h -> s b h
+            encoder_hidden_states = encoder_hidden_states.swapaxes(0,1).contiguous()
+            timestep = timestep.view(batch_size, 6, -1).swapaxes(0, 1).contiguous()
 
         sparse_mask = {}
         # if npu_config is None:
@@ -331,12 +331,16 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
         head_num = None
         for sparse_n in [1, 4]:
             sparse_mask[sparse_n] = Attention.prepare_sparse_mask(attention_mask, encoder_attention_mask, sparse_n, head_num)
+        
         # 2. Blocks
         for i, block in enumerate(self.transformer_blocks):
             if i > 1 and i < 30:
                 attention_mask, encoder_attention_mask = sparse_mask[block.attn1.processor.sparse_n][block.attn1.processor.sparse_group]
             else:
                 attention_mask, encoder_attention_mask = sparse_mask[1][block.attn1.processor.sparse_group]
+
+            # if self.training and self.gradient_checkpointing: #TODO: training 
+
             hidden_states = block(
                     hidden_states,
                     attention_mask=attention_mask,
@@ -346,11 +350,12 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
                     frame=frame, 
                     height=height, 
                     width=width, 
-                )
+                ) # BSH
 
-        # To (b, t*h*w, h) or (b, t//sp*h*w, h)
-        # s b h -> b s h
-        hidden_states = hidden_states.swapaxes(0, 1).contiguous()
+        if get_sequence_parallel_state():
+            # To (b, t*h*w, h) or (b, t//sp*h*w, h)
+            # s b h -> b s h
+            hidden_states = hidden_states.swapaxes(0, 1).contiguous()
 
         # 3. Output
         output = self._get_output_for_patched_inputs(
@@ -367,17 +372,15 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
 
     def _operate_on_patched_inputs(self, hidden_states, encoder_hidden_states, timestep, batch_size, frame):
         
-        hidden_states = self.pos_embed(hidden_states.to(self.dtype))
+        hidden_states = self.pos_embed(hidden_states.to(self.dtype)) # (b, t*h*w, d)
 
         added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
         timestep, embedded_timestep = self.adaln_single(
             timestep, added_cond_kwargs, batch_size=batch_size, hidden_dtype=self.dtype
         )  # b 6d, b d
 
-        print("encoder_hidden_states.shape before cap proj", encoder_hidden_states.shape)
         encoder_hidden_states = self.caption_projection(encoder_hidden_states)  # b, 1, l, d
-        print("encoder_hidden_states.shape after cap proj", encoder_hidden_states.shape)
-        # assert encoder_hidden_states.shape[1] == 1, f'encoder_hidden_states.shape is {encoder_hidden_states}'
+        assert encoder_hidden_states.shape[1] == 1, f'encoder_hidden_states.shape is {encoder_hidden_states}'
         # b 1 l d -> (b 1) l d
         encoder_hidden_states = encoder_hidden_states.reshape(-1, encoder_hidden_states.shape[-2], encoder_hidden_states.shape[-1])
 
@@ -390,20 +393,17 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
     ):  
         shift, scale = (self.scale_shift_table[None] + embedded_timestep[:, None]).chunk(2, axis=1)
         hidden_states = self.norm_out(hidden_states)
-        # Modulation
-        hidden_states = hidden_states * (1 + scale) + shift
-        hidden_states = self.proj_out(hidden_states)
-        hidden_states = hidden_states.squeeze(1)
+        hidden_states = hidden_states.squeeze(1) if hidden_states.shape[1] == 1 else hidden_states
 
         # unpatchify
         hidden_states = hidden_states.reshape(
-            shape=(-1, num_frames, height, width, self.config.patch_size_t, self.config.patch_size, self.config.patch_size, self.out_channels)
+            -1, num_frames, height, width, self.config.patch_size_t, self.config.patch_size, self.config.patch_size, self.out_channels
         )
         # nthwopqc -> nctohpwq
         hidden_states = hidden_states.permute(0, 7, 1, 4, 2, 5, 3, 6)
         output = hidden_states.reshape(
-            shape=(-1, self.out_channels, 
-                   num_frames * self.config.patch_size_t, height * self.config.patch_size, width * self.config.patch_size)
+            -1, self.out_channels, 
+                   num_frames * self.config.patch_size_t, height * self.config.patch_size, width * self.config.patch_size
         )
         return output
 
@@ -427,10 +427,10 @@ if __name__ == '__main__':
 
     args = type('args', (), 
     {
-        'ae': 'WFVAEModel_D8_4x8x8', 
+        'ae': "CausalVAEModel_D4_4x8x8", #'WFVAEModel_D8_4x8x8', 
         'model_max_length': 300, 
-        'max_height': 176,
-        'max_width': 176,
+        'max_height': 256,
+        'max_width': 512,
         'num_frames': 33,
         'compress_kv_factor': 1, 
         'interpolation_scale_t': 1,
@@ -455,7 +455,7 @@ if __name__ == '__main__':
         sample_size_h=latent_size, 
         sample_size_w=latent_size, 
         sample_size_t=num_frames, 
-        activation_fn="gelu-approximate",
+        # activation_fn="gelu-approximate",
         attention_bias=True,
         double_self_attention=False,
         norm_elementwise_affine=False,
@@ -470,15 +470,15 @@ if __name__ == '__main__':
     )
     
     try:
-        path = "/storage/ongoing/new/7.19anyres/Open-Sora-Plan/bs32x8x1_anyx93x640x640_fps16_lr1e-5_snr5_ema9999_sparse1d4_dit_l_mt5xxl_vpred_zerosnr/checkpoint-43000/model_ema/diffusion_pytorch_model.safetensors"
+        path = "/home_host/susan/workspace/checkpoints/Open-Sora-Plan-v1.3.0/any93x640x640/diffusion_pytorch_model.safetensors"
         from safetensors.torch import load_file as safe_load
         ckpt = safe_load(path, device="cpu")
         msg = model.load_state_dict(ckpt, strict=True)
         print(msg)
     except Exception as e:
         print(e)
-    print(model)
-    print(f'{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e9} B')
+    # print(model)
+    # print(f"{sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e9} B")
     # import sys;sys.exit()
     x = ops.randn(b, c,  1+(args.num_frames-1)//ae_stride_t, args.max_height//ae_stride_h, args.max_width//ae_stride_w)
     cond = ops.randn(b, 1, args.model_max_length, cond_c)
