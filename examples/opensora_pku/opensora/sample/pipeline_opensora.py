@@ -35,7 +35,6 @@ import PIL
 
 from examples.opensora_pku.opensora.models.diffusion.opensora.modeling_opensora import OpenSoraT2V_v1_3
 
-logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 @dataclass
 class OpenSoraPipelineOutput(BaseOutput):
@@ -153,6 +152,11 @@ class OpenSoraPipeline(DiffusionPipeline):
         )
         self.all_gather = None if not get_sequence_parallel_state() else AllGather()
 
+
+    @ms.jit  # FIXME: on ms2.3, in pynative mode, text encoder's output has nan problem.
+    def text_encoding_func(self, text_encoder, input_ids, attention_mask):
+        return ops.stop_gradient(text_encoder(input_ids, attention_mask=attention_mask))
+
     def encode_prompt(
         self,
         prompt: str,
@@ -222,6 +226,7 @@ class OpenSoraPipeline(DiffusionPipeline):
 
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
+            prompt = [prompt]
         elif prompt is not None and isinstance(prompt, list):
             batch_size = len(prompt)
         else:
@@ -233,7 +238,7 @@ class OpenSoraPipeline(DiffusionPipeline):
                 padding="max_length",
                 max_length=max_length,
                 truncation=True,
-                return_attention_mask=True,
+                # return_attention_mask=True,
                 return_tensors=None,
             )
             text_input_ids = ms.Tensor(text_inputs.input_ids)
@@ -250,16 +255,17 @@ class OpenSoraPipeline(DiffusionPipeline):
                 )
 
             prompt_attention_mask = ms.Tensor(text_inputs.attention_mask)
-            prompt_embeds = text_encoder(
-                text_input_ids,
-                attention_mask=prompt_attention_mask,
-            )
-            prompt_embeds = prompt_embeds[0]
+            print("text_input_ids.shape", text_input_ids.shape)
+            print("prompt_attention_mask.shape", prompt_attention_mask.shape)
+            prompt_embeds = self.text_encoding_func(text_encoder, text_input_ids, attention_mask=prompt_attention_mask)
+            prompt_embeds = prompt_embeds[0] if isinstance(prompt_embeds, (list, tuple)) else prompt_embeds
 
             if text_encoder_index == 1:
                 prompt_embeds = prompt_embeds.unsqueeze(1)  # b d -> b 1 d for clip
 
             prompt_attention_mask = prompt_attention_mask.repeat(num_samples_per_prompt, axis=0)
+        else:
+            prompt_attention_mask = ops.ones_like(prompt_embeds)
 
         prompt_embeds = prompt_embeds.to(dtype=dtype)
 
@@ -274,11 +280,11 @@ class OpenSoraPipeline(DiffusionPipeline):
             uncond_tokens: List[str]
             if negative_prompt is None:
                 uncond_tokens = [""] * batch_size
-            elif prompt is not None and type(prompt) is not type(negative_prompt):
-                raise TypeError(
-                    f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
-                    f" {type(prompt)}."
-                )
+            # elif prompt is not None and type(prompt) is not type(negative_prompt):
+            #     raise TypeError(
+            #         f"`negative_prompt` should be the same type to `prompt`, but got {type(negative_prompt)} !="
+            #         f" {type(prompt)}."
+            #     )
             elif isinstance(negative_prompt, str):
                 uncond_tokens = [negative_prompt]
             elif batch_size != len(negative_prompt):
@@ -299,12 +305,11 @@ class OpenSoraPipeline(DiffusionPipeline):
                 return_tensors=None,
             )
 
+            uncond_text_inputs = ms.Tensor(uncond_input.input_ids)
             negative_prompt_attention_mask = ms.Tensor(uncond_input.attention_mask)
-            negative_prompt_embeds = text_encoder(
-                ms.Tensor(uncond_input.input_ids),
-                attention_mask=negative_prompt_attention_mask,
-            )
-            negative_prompt_embeds = negative_prompt_embeds[0]
+            negative_prompt_embeds = self.text_encoding_func(text_encoder, uncond_text_inputs, attention_mask=negative_prompt_attention_mask)
+            negative_prompt_embeds = negative_prompt_embeds[0] if isinstance(negative_prompt_embeds, (list, tuple)) else negative_prompt_embeds
+
             if text_encoder_index == 1:
                 negative_prompt_embeds = negative_prompt_embeds.unsqueeze(1)  # b d -> b 1 d for clip
             negative_prompt_attention_mask = negative_prompt_attention_mask.repeat(num_samples_per_prompt, axis=0)
@@ -317,6 +322,9 @@ class OpenSoraPipeline(DiffusionPipeline):
 
             negative_prompt_embeds = negative_prompt_embeds.repeat(num_samples_per_prompt, axis = 1)
             negative_prompt_embeds = negative_prompt_embeds.view((batch_size * num_samples_per_prompt, seq_len, -1))
+        else:
+            negative_prompt_embeds = None
+            negative_prompt_attention_mask = None
 
         return prompt_embeds, negative_prompt_embeds, prompt_attention_mask, negative_prompt_attention_mask
 
@@ -442,6 +450,24 @@ class OpenSoraPipeline(DiffusionPipeline):
             latents = latents * self.scheduler.init_noise_sigma
         return latents
 
+    def prepare_parallel_latent(self, video_states):
+        sp_size = hccl_info.world_size
+        index = hccl_info.rank % sp_size
+        padding_needed = (sp_size - video_states.shape[2] % sp_size) % sp_size
+        temp_attention_mask = None
+        if padding_needed > 0:
+            logger.debug("Doing video padding")
+            # B, C, T, H, W -> B, C, T', H, W
+            video_states = mint.nn.functional.pad(video_states, (0, 0, 0, 0, 0, padding_needed), mode="constant", value=0)
+
+            b, _, f, h, w = video_states.shape
+            temp_attention_mask = mint.ones((b, f), ms.int32)
+            temp_attention_mask[:, -padding_needed:] = 0
+
+        assert video_states.shape[2] % sp_size == 0
+        video_states = ops.chunk(video_states, sp_size, 2)[index]
+        return video_states, temp_attention_mask
+        
     @property
     def guidance_scale(self):
         return self._guidance_scale
@@ -486,14 +512,14 @@ class OpenSoraPipeline(DiffusionPipeline):
         negative_prompt_attention_mask_2: Optional[ms.Tensor] = None,
         output_type: Optional[str] = "pil",
         return_dict: bool = True,
-        callback_on_step_end = None, #  Optional[Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]]
+        callback_on_step_end: Optional[Callable[[int, int, ms.Tensor], None]] = None, #  Optional[Union[Callable[[int, int, Dict], None], PipelineCallback, MultiPipelineCallbacks]]
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         guidance_rescale: float = 0.0,
         max_sequence_length: int = 512
     ):
         # TODO
         # if isinstance(callback_on_step_end, (PipelineCallback, MultiPipelineCallbacks)):
-        callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
+        #     callback_on_step_end_tensor_inputs = callback_on_step_end.tensor_inputs
 
         # 0. default height and width
         num_frames = num_frames or (self.transformer.config.sample_size_t - 1) * self.vae.vae_scale_factor[0] + 1
@@ -585,6 +611,7 @@ class OpenSoraPipeline(DiffusionPipeline):
             timesteps, num_inference_steps = retrieve_timesteps(self.scheduler, num_inference_steps, timesteps)
             num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
             self._num_timesteps = len(timesteps)
+
         # 5. Prepare latent variables
         if get_sequence_parallel_state():
             world_size = hccl_info.world_size
@@ -605,6 +632,7 @@ class OpenSoraPipeline(DiffusionPipeline):
             extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
         else:
             extra_step_kwargs = {}
+
         # 7 create image_rotary_emb, style embedding & time ids
         if self.do_classifier_free_guidance:
             prompt_embeds = ops.cat([negative_prompt_embeds, prompt_embeds], axis=0)
@@ -615,13 +643,28 @@ class OpenSoraPipeline(DiffusionPipeline):
 
         # ==================make sp=====================================
         if get_sequence_parallel_state():
+            # # b (n x) h -> b n x h
+            # b, _, h = prompt_embeds.shape
+            # n = world_size
+            # x = prompt_embeds.shape[1] // world_size
+            # prompt_embeds = prompt_embeds.reshape(b, n, x, h).contiguous()
+            # rank = hccl_info.rank
+            # prompt_embeds = prompt_embeds[:, rank, :, :]
+
+            latents, temp_attention_mask = self.prepare_parallel_latent(latents)
+            temp_attention_mask = (
+                ops.cat([temp_attention_mask] * 2)
+                if (self.do_classifier_free_guidance and temp_attention_mask is not None)
+                else temp_attention_mask
+            )
             # b (n x) h -> b n x h
-            b, _, h = prompt_embeds.shape
-            n = world_size
-            x = prompt_embeds.shape[1] // world_size
-            prompt_embeds = prompt_embeds.reshape(b, n, x, h).contiguous()
-            rank = hccl_info.rank
-            prompt_embeds = prompt_embeds[:, rank, :, :]
+            prompt_embeds = prompt_embeds.reshape(
+                prompt_embeds.shape[0], world_size, prompt_embeds.shape[1] // world_size, -1
+            ).contiguous()
+            index = hccl_info.rank % world_size
+            prompt_embeds = prompt_embeds[:, index, :, :]
+        else:
+            temp_attention_mask = None
         # ==================make sp=====================================
 
         # 8. Denoising loop
@@ -636,10 +679,12 @@ class OpenSoraPipeline(DiffusionPipeline):
                     latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 # expand scalar t to 1-D tensor to match the 1st dim of latent_model_input
-                if not isinstance(self.scheduler, FlowMatchEulerDiscreteScheduler):
-                    timestep = ms.Tensor([t] * latent_model_input.shape[0]).to(dtype=latent_model_input.dtype)
-                else:
-                    timestep = t.broadcast_to((latent_model_input.shape[0]))
+                current_timestep = t
+                if not isinstance(current_timestep, ms.Tensor):
+                    current_timestep = ms.Tensor([current_timestep], dtype=latent_model_input.dtype)
+                elif len(current_timestep.shape) == 0:
+                    current_timestep = current_timestep[None]
+                current_timestep = current_timestep.repeat_interleave(latent_model_input.shape[0], 0)
 
                 # ==================prepare my shape=====================================
                 # predict the noise residual
@@ -651,6 +696,12 @@ class OpenSoraPipeline(DiffusionPipeline):
                     prompt_embeds = prompt_embeds.unsqueeze(1)  # b d -> b 1 d
                 
                 attention_mask = ops.ones_like(latent_model_input)[:, 0]
+                if temp_attention_mask is not None:
+                    # temp_attention_mask shape (bs, t), 1 means to keep, 0 means to discard
+                    # TODO: mask temporal padded tokens
+                    attention_mask = (
+                        attention_mask.to(ms.int32) * temp_attention_mask[:, :, None, None].to(ms.int32)
+                    ).to(ms.bool_)
                 # ==================prepare my shape=====================================
 
                 # ==================make sp=====================================
@@ -664,7 +715,7 @@ class OpenSoraPipeline(DiffusionPipeline):
                         attention_mask=attention_mask, 
                         encoder_hidden_states=prompt_embeds,
                         encoder_attention_mask=prompt_attention_mask,
-                        timestep=timestep,
+                        timestep=current_timestep,
                         pooled_projections=prompt_embeds_2,
                         return_dict=False,
                     )

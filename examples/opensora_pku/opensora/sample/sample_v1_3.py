@@ -40,7 +40,7 @@ from mindone.diffusers import (
     FlowMatchEulerDiscreteScheduler
     )
 from mindone.transformers import T5EncoderModel, MT5EncoderModel, CLIPTextModelWithProjection
-from transformers import T5Tokenizer, AutoTokenizer
+from transformers import AutoTokenizer, MT5Tokenizer
 
 from mindone.utils.amp import auto_mixed_precision
 from mindone.utils.config import str2bool
@@ -96,12 +96,10 @@ def get_scheduler(args):
     return scheduler
 
 def parse_args():
+    parser = argparse.ArgumentParser()
     
     parser.add_argument("--version", type=str, default='v1_3', choices=['v1_3', 'v1_5'])
-    parser.add_argument("--model_type", type=str, default='t2v', choices=['t2v', 'inpaint', 'i2v'])
     parser.add_argument("--caption_refiner", type=str, default=None)
-    parser.add_argument("--ae", type=str, default='CausalVAEModel_4x8x8')
-    parser.add_argument("--ae_path", type=str, default='CausalVAEModel_4x8x8')
     parser.add_argument("--enhance_video", type=str, default=None)
     parser.add_argument("--text_encoder_name_1", type=str, default='DeepFloyd/t5-v1_1-xxl')
     parser.add_argument("--text_encoder_name_2", type=str, default=None)
@@ -120,7 +118,6 @@ def parse_args():
     parser.add_argument('--crop_for_hw', action='store_true')
     parser.add_argument('--max_hxw', type=int, default=236544) # 480*480
 
-    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config",
         "-c",
@@ -234,7 +231,7 @@ def parse_args():
     parser.add_argument(
         "--video_extension", default="mp4", choices=["gif", "mp4"], help="The file extension to save videos"
     )
-    parser.add_argument("--model_type", type=str, default="dit", choices=["dit", "udit", "latte"])
+    parser.add_argument("--model_type", type=str, default="dit", choices=["dit", "udit", "latte", 't2v', 'inpaint', 'i2v'])
     parser.add_argument("--cache_dir", type=str, default="./")
     parser.add_argument("--profile", default=False, type=str2bool, help="Profile or not")
     default_args = parser.parse_args()
@@ -277,18 +274,20 @@ def prepare_pipeline(args):
         print("To decode latents, skipped loading text endoers and transformer")
         return vae
     
-
     # Build text encoders
     print_banner("text encoder init")
     text_encoder_dtype = get_precision(args.text_encoder_precision)
     if 'mt5' in args.text_encoder_name_1:
-        text_encoder_1 = MT5EncoderModel.from_pretrained(
+        text_encoder_1, loading_info = MT5EncoderModel.from_pretrained(
             args.text_encoder_name_1, 
             cache_dir=args.cache_dir, 
             output_loading_info=True,
             mindspore_dtype=text_encoder_dtype,
             use_safetensors=True
-            ).set_train(False)
+            )      
+        loading_info.pop("unexpected_keys")  # decoder weights are ignored
+        logger.info(loading_info)
+        text_encoder_1 = text_encoder_1.set_train(False)  
     else:
         text_encoder_1 = T5EncoderModel.from_pretrained(
             args.text_encoder_name_1, cache_dir=args.cache_dir, 
@@ -323,14 +322,24 @@ def prepare_pipeline(args):
     else:
         state_dict = None
     model_version = args.model_path.split("/")[-1]
-    if int(model_version.split("x")[0]) != args.num_frames:
-        logger.warning(
-            f"Detect that the loaded model version is {model_version}, but found a mismatched number of frames {model_version.split('x')[0]}"
-        )
-    if int(model_version.split("x")[1][:-1]) != args.height:
-        logger.warning(
-            f"Detect that the loaded model version is {model_version}, but found a mismatched resolution {args.height}x{args.width}"
-        )
+    if (args.version != 'v1_3') and (model_version.split("x")[0][:3] != "any"):
+        if int(model_version.split("x")[0]) != args.num_frames:
+            logger.warning(
+                f"Detect that the loaded model version is {model_version}, but found a mismatched number of frames {model_version.split('x')[0]}"
+            )
+        if int(model_version.split("x")[1][:-1]) != args.height:
+            logger.warning(
+                f"Detect that the loaded model version is {model_version}, but found a mismatched resolution {args.height}x{args.width}"
+            )
+    elif (args.version == 'v1_3') and (model_version.split("x")[0] == "any93x640x640"): # TODO: currently only release one model
+        if (args.height % 32 != 0) or (args.width % 32 != 0):
+            logger.warning(
+                f"Detect that the loaded model version is {model_version}, but found a mismatched resolution {args.height}x{args.width}. The resolution of the inference should be a multiple of 32."
+            )
+        if (args.num_frames - 1) % 4 != 0:
+            logger.warning(
+                    f"Detect that the loaded model version is {model_version}, but found a mismatched number of frames {args.num_frames}. Frames needs to be 4n+1, e.g. 93, 77, 61, 45, 29, 1 (image)"
+                )
 
     if args.version == 'v1_3':
         # TODO
@@ -393,6 +402,7 @@ def prepare_pipeline(args):
     for param in transformer_model.get_parameters():  # freeze transformer_model
         param.requires_grad = False
 
+
     # Build scheduler
     scheduler = get_scheduler(args)
     
@@ -420,7 +430,7 @@ def prepare_pipeline(args):
         [
             f"MindSpore mode[GRAPH(0)/PYNATIVE(1)]: {args.mode}",
             f"Jit level: {args.jit_level}",
-            f"Num of samples: {n}",
+            f"Num of samples: {len(args.text_prompt)}",
             f"Num params: {num_params:,} (latte: {num_params_latte:,}, vae: {num_params_vae:,})",
             f"Num trainable params: {num_params_trainable:,}",
             f"Transformer dtype: {dtype}",
@@ -493,8 +503,8 @@ def run_model_and_save_samples(args, pipeline, caption_refiner_model=None, enhan
     ds_iter = dataset.create_dict_iterator(1, output_numpy=True)
 
     # Decode latents directly
-    print("Directly decoding latents...")
     if args.decode_latents:
+        print("Directly decoding latents...")
         assert isinstance(pipeline, CausalVAEModelWrapper)
         vae = pipeline
         for step, data in tqdm(enumerate(ds_iter), total=dataset_size):
@@ -519,27 +529,15 @@ def run_model_and_save_samples(args, pipeline, caption_refiner_model=None, enhan
                 save_fp = os.path.join(save_dir, file_paths[i_sample]).replace(".npy", f".{args.video_extension}")
                 save_video_data = decode_data[i_sample : i_sample + 1]
                 save_videos(save_video_data, save_fp, loop=0, fps=args.fps)  # (b t h w c)
-        return
+        
+        # Delete files that are no longer needed
+        if os.path.exists(temp_dataset_csv):
+            os.remove(temp_dataset_csv)
 
-    # handle input text prompts
-    print_banner("text prompts loading")
-    ext = (
-        f"{args.video_extension}" if not (args.save_latents or args.decode_latents) else "npy"
-    )  # save video as gif or save denoised latents as npy files.
-    ext = "jpg" if args.num_frames == 1 else ext
-    if not isinstance(args.text_prompt, list):
-        args.text_prompt = [args.text_prompt]
-     # if input is a text file, where each line is a caption, load it into a list
-    if len(args.text_prompt) == 1 and args.text_prompt[0].endswith("txt"):
-        captions = open(args.text_prompt[0], "r").readlines()
-        args.text_prompt = [i.strip() for i in captions]
-    if len(args.text_prompt) == 1 and args.text_prompt[0].endswith("csv"):
-        captions = pd.read_csv(args.text_prompt[0])
-        args.text_prompt = [i.strip() for i in captions["cap"]]
-    n = len(args.text_prompt)
-    assert n > 0, "No captions provided"
-    logger.info(f"Number of prompts: {n}")
-    logger.info(f"Number of generated samples for each prompt {args.num_videos_per_prompt}")
+        if args.decode_latents:
+            npy_files = glob.glob(os.path.join(save_dir, "*.npy"))
+            for fp in npy_files:
+                os.remove(fp)
     
     # TODO
     # if args.model_type == 'inpaint' or args.model_type == 'i2v':
@@ -664,10 +662,10 @@ def run_model_and_save_samples(args, pipeline, caption_refiner_model=None, enhan
     if os.path.exists(temp_dataset_csv):
         os.remove(temp_dataset_csv)
 
-    if args.decode_latents:
-        npy_files = glob.glob(os.path.join(save_dir, "*.npy"))
-        for fp in npy_files:
-            os.remove(fp)
+    # if args.decode_latents:
+    #     npy_files = glob.glob(os.path.join(save_dir, "*.npy"))
+    #     for fp in npy_files:
+    #         os.remove(fp)
 
 
 if __name__ == "__main__":
