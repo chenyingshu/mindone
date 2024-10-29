@@ -50,6 +50,8 @@ from mindone.visualize.videos import save_videos
 
 logger = logging.getLogger(__name__)
 
+# ms.set_context(pynative_synchronize=True)
+
 # Copied from opensora.utils sample_utils.py
 def get_scheduler(args):
     kwargs = dict(
@@ -101,8 +103,8 @@ def parse_args():
     parser.add_argument("--version", type=str, default='v1_3', choices=['v1_3', 'v1_5'])
     parser.add_argument("--caption_refiner", type=str, default=None)
     parser.add_argument("--enhance_video", type=str, default=None)
-    parser.add_argument("--text_encoder_name_1", type=str, default='DeepFloyd/t5-v1_1-xxl')
-    parser.add_argument("--text_encoder_name_2", type=str, default=None)
+    parser.add_argument("--text_encoder_name_1", type=str, default='DeepFloyd/t5-v1_1-xxl', help="google/mt5-xxl, DeepFloyd/t5-v1_1-xxl")
+    parser.add_argument("--text_encoder_name_2", type=str, default=None, help="laion/CLIP-ViT-bigG-14-laion2B-39B-b160k, openai/clip-vit-large-patch14")
     parser.add_argument("--num_samples_per_prompt", type=int, default=1)
     parser.add_argument('--refine_caption', action='store_true')
     # parser.add_argument('--compile', action='store_true')
@@ -274,39 +276,45 @@ def prepare_pipeline(args):
         print("To decode latents, skipped loading text endoers and transformer")
         return vae
     
-    # # Build text encoders
-    # print_banner("text encoder init")
-    # text_encoder_dtype = get_precision(args.text_encoder_precision)
-    # if 'mt5' in args.text_encoder_name_1:
-    #     text_encoder_1, loading_info = MT5EncoderModel.from_pretrained(
-    #         args.text_encoder_name_1, 
-    #         cache_dir=args.cache_dir, 
-    #         output_loading_info=True,
-    #         mindspore_dtype=text_encoder_dtype,
-    #         use_safetensors=True
-    #         )      
-    #     loading_info.pop("unexpected_keys")  # decoder weights are ignored
-    #     logger.info(loading_info)
-    #     text_encoder_1 = text_encoder_1.set_train(False)  
-    # else:
-    #     text_encoder_1 = T5EncoderModel.from_pretrained(
-    #         args.text_encoder_name_1, cache_dir=args.cache_dir, 
-    #         mindspore_dtype=text_encoder_dtype
-    #         ).set_train(False)
-    # tokenizer_1 = AutoTokenizer.from_pretrained(
-    #     args.text_encoder_name_1, cache_dir=args.cache_dir
-    #     )
+    # Build text encoders
+    print_banner("text encoder init")
+    text_encoder_dtype = get_precision(args.text_encoder_precision)
+    if 'mt5' in args.text_encoder_name_1:
+        text_encoder_1, loading_info = MT5EncoderModel.from_pretrained(
+            args.text_encoder_name_1, 
+            cache_dir=args.cache_dir, 
+            output_loading_info=True,
+            mindspore_dtype=text_encoder_dtype,
+            use_safetensors=True
+            )      
+        loading_info.pop("unexpected_keys")  # decoder weights are ignored
+        logger.info(f"Loaded MT5 Encoder: {loading_info}")
+        text_encoder_1 = text_encoder_1.set_train(False)  
+    else:
+        text_encoder_1 = T5EncoderModel.from_pretrained(
+            args.text_encoder_name_1, cache_dir=args.cache_dir, 
+            mindspore_dtype=text_encoder_dtype
+            ).set_train(False)
+    tokenizer_1 = AutoTokenizer.from_pretrained(
+        args.text_encoder_name_1, cache_dir=args.cache_dir
+        )
 
-    # if args.text_encoder_name_2 is not None:
-    #     text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
-    #         args.text_encoder_name_2, cache_dir=args.cache_dir, 
-    #         mindspore_dtype=text_encoder_dtype
-    #         ).set_train(False)
-    #     tokenizer_2 = AutoTokenizer.from_pretrained(
-    #         args.text_encoder_name_2, cache_dir=args.cache_dir
-    #         )
-    # else:
-    #     text_encoder_2, tokenizer_2 = None, None
+    if args.text_encoder_name_2 is not None:
+        text_encoder_2, loading_info = CLIPTextModelWithProjection.from_pretrained(
+            args.text_encoder_name_2, 
+            cache_dir=args.cache_dir, 
+            mindspore_dtype=text_encoder_dtype,
+            output_loading_info=True,
+            use_safetensors=True,
+            )
+        # loading_info.pop("unexpected_keys")  # Only load text model, ignore vision model
+        logger.info(f"Loaded CLIP Encoder: {loading_info}")
+        text_encoder_2 = text_encoder_2.set_train(False)
+        tokenizer_2 = AutoTokenizer.from_pretrained(
+            args.text_encoder_name_2, cache_dir=args.cache_dir
+            )
+    else:
+        text_encoder_2, tokenizer_2 = None, None
 
     # Build transformer
     print_banner("transformer model init")
@@ -401,41 +409,7 @@ def prepare_pipeline(args):
     transformer_model = transformer_model.set_train(False)
     for param in transformer_model.get_parameters():  # freeze transformer_model
         param.requires_grad = False
-    print("transformer_model.config", transformer_model.config)
-
-    # Build text encoders
-    print_banner("text encoder init")
-    text_encoder_dtype = get_precision(args.text_encoder_precision)
-    if 'mt5' in args.text_encoder_name_1:
-        text_encoder_1, loading_info = MT5EncoderModel.from_pretrained(
-            args.text_encoder_name_1, 
-            cache_dir=args.cache_dir, 
-            output_loading_info=True,
-            mindspore_dtype=text_encoder_dtype,
-            use_safetensors=True
-            )      
-        loading_info.pop("unexpected_keys")  # decoder weights are ignored
-        logger.info(loading_info)
-        text_encoder_1 = text_encoder_1.set_train(False)  
-    else:
-        text_encoder_1 = T5EncoderModel.from_pretrained(
-            args.text_encoder_name_1, cache_dir=args.cache_dir, 
-            mindspore_dtype=text_encoder_dtype
-            ).set_train(False)
-    tokenizer_1 = AutoTokenizer.from_pretrained(
-        args.text_encoder_name_1, cache_dir=args.cache_dir
-        )
-
-    if args.text_encoder_name_2 is not None:
-        text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
-            args.text_encoder_name_2, cache_dir=args.cache_dir, 
-            mindspore_dtype=text_encoder_dtype
-            ).set_train(False)
-        tokenizer_2 = AutoTokenizer.from_pretrained(
-            args.text_encoder_name_2, cache_dir=args.cache_dir
-            )
-    else:
-        text_encoder_2, tokenizer_2 = None, None
+    # print("transformer_model.config", transformer_model.config)
 
     # Build scheduler
     scheduler = get_scheduler(args)
@@ -492,6 +466,8 @@ def run_model_and_save_samples(args, pipeline, caption_refiner_model=None, enhan
         f"{args.video_extension}" if not (args.save_latents or args.decode_latents) else "npy"
     )  # save video as gif or save denoised latents as npy files.
     ext = "jpg" if args.num_frames == 1 else ext
+    print(f"ext {ext}")
+
     if not isinstance(args.text_prompt, list):
         args.text_prompt = [args.text_prompt]
     # if input is a text file, where each line is a caption, load it into a list
@@ -598,7 +574,7 @@ def run_model_and_save_samples(args, pipeline, caption_refiner_model=None, enhan
         + "extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry"
     )
 
-    def generate(step, data, conditional_pixel_values_path=None, mask_type=None):
+    def generate(step, data, ext, conditional_pixel_values_path=None, mask_type=None):
         
         # TODO  
         # if args.caption_refiner is not None:
@@ -660,6 +636,7 @@ def run_model_and_save_samples(args, pipeline, caption_refiner_model=None, enhan
             # save result
             for i_sample in range(args.batch_size):
                 file_path = os.path.join(save_dir, file_paths[i_sample])
+                print(f"Saving to {file_path}...")
                 assert ext in file_path, f"Only support saving as {ext} files, but got {file_path}."
                 if args.save_latents:
                     np.save(file_path, videos[i_sample : i_sample + 1])
@@ -689,17 +666,13 @@ def run_model_and_save_samples(args, pipeline, caption_refiner_model=None, enhan
     #     print('completed, please check the saved images and videos')
     # else:
     for step, data in tqdm(enumerate(ds_iter), total=dataset_size):
-        generate(step, data)
+        generate(step, data, ext)
     
     
     # Delete files that are no longer needed
     if os.path.exists(temp_dataset_csv):
         os.remove(temp_dataset_csv)
 
-    # if args.decode_latents:
-    #     npy_files = glob.glob(os.path.join(save_dir, "*.npy"))
-    #     for fp in npy_files:
-    #         os.remove(fp)
 
 
 if __name__ == "__main__":

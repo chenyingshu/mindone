@@ -56,18 +56,14 @@ class PatchEmbed2D(nn.Cell):
         )
 
     def construct(self, latent):
-        b, c, t, h, w = latent.shape
-        print("PatchEmbed2D construct()")
-        print("latent.shape", latent.shape) # b, c=in_channels, t, h, w
+        b, c, t, h, w = latent.shape # b, c=in_channels, t, h, w
         # b c t h w -> (b t) c h w
         latent = latent.permute(0, 2, 1, 3, 4).reshape(b*t, c, h, w) # b*t, c, h, w
-        print("latent.shape", latent.shape)
-        latent = self.proj(latent) 
-        print("latent.shape", latent.shape)  # b*t, embed_dim, h, w
+        latent = self.proj(latent)  # b*t, embed_dim, h, w
         # (b t) c h w -> b (t h w) c
         _, c, h, w = latent.shape
-        latent = latent.reshape(b, -1, c, h, w).permute(0, 1, 3, 4, 2).reshape(b, -1, c)
-        print("latent.shape", latent.shape) # b, t*h*w, embed_dim
+        latent = latent.reshape(b, -1, c, h, w).permute(0, 1, 3, 4, 2).reshape(b, -1, c) # b, t*h*w, embed_dim
+        
         return latent
 
 
@@ -100,8 +96,6 @@ class Attention(Attention_):
     
     @staticmethod
     def prepare_sparse_mask(attention_mask, encoder_attention_mask, sparse_n, head_num):
-        print("attention_mask.shape", attention_mask.shape)
-        print("encoder_attention_mask.shape", encoder_attention_mask.shape)
         
         attention_mask = attention_mask.unsqueeze(1)
         encoder_attention_mask = encoder_attention_mask.unsqueeze(1)
@@ -112,8 +106,6 @@ class Attention(Attention_):
             pad_len = sparse_n * sparse_n - l % (sparse_n * sparse_n)
 
         attention_mask_sparse = mint.nn.functional.pad(attention_mask, (0, pad_len, 0, 0), mode="constant", value=-9980.0)
-        print("padding: attention_mask.shape", attention_mask.shape)
-        print("padding: encoder_attention_mask.shape", encoder_attention_mask.shape)
         b = attention_mask_sparse.shape[0]
         k = sparse_n
         m = sparse_n
@@ -140,10 +132,6 @@ class Attention(Attention_):
 
             # encoder_attention_mask_sparse_1d = encoder_attention_mask_sparse.repeat_interleave(head_num, dim=1)
             # encoder_attention_mask_sparse_1d_group = encoder_attention_mask_sparse_1d
-        
-        print(f"attention_mask_sparse_1d {attention_mask_sparse_1d.shape}, encoder_attention_mask_sparse_1d {encoder_attention_mask_sparse_1d.shape}")
-        
-        print(f"attention_mask_sparse_1d_group {attention_mask_sparse_1d_group.shape}, encoder_attention_mask_sparse_1d_group {encoder_attention_mask_sparse_1d_group.shape}")
         
         return {
                     False: (attention_mask_sparse_1d, encoder_attention_mask_sparse_1d),
@@ -178,7 +166,6 @@ class Attention(Attention_):
 
         current_length: int = attention_mask.shape[-1]
         if current_length != target_length:
-            print(f'attention_mask.shape, {attention_mask.shape}, current_length, {current_length}, target_length, {target_length}')
             attention_mask = mint.nn.functional.pad(attention_mask, (0, target_length), mode="constant", value=0.0)
 
         if out_dim == 3:
@@ -349,7 +336,6 @@ class OpenSoraAttnProcessor2_0:
             x: shape if sparse_group: (S//sparse_n, sparse_n*B, D), else: (S//sparse_n, sparse_n*B, D)
             pad_len: 0 or padding 
         """
-        print(f"sparse_1d: x.shape {x.shape}")
         l = x.shape[0]
         assert l == frame*height*width
         pad_len = 0
@@ -357,20 +343,18 @@ class OpenSoraAttnProcessor2_0:
             pad_len = self.sparse_n * self.sparse_n - l % (self.sparse_n * self.sparse_n)
         if pad_len != 0:
             x = mint.nn.functional.pad(x, (0, 0, 0, 0, 0, pad_len), mode="constant", value=0.0)
-            print(f"sparse_1d padding: sparse_group: x.shape {x.shape}")
         
         _, b, d = x.shape
         if not self.sparse_group:
             # (g k) b d -> g (k b) d
             k = self.sparse_n
             x = x.reshape(-1, k, b, d).reshape(-1, k * b, d)
-            print(f"sparse_1d sparse_group: x.shape {x.shape}")
         else:
             # (n m k) b d -> (n k) (m b) d
             m = self.sparse_n 
             k = self.sparse_n
             x = x.reshape(-1, m, k, b, d).permute(0, 2, 1, 3, 4).reshape(-1, m*b, d)
-            print(f"sparse_1d: x.shape {x.shape}")
+            
         return x, pad_len
     
     def _reverse_sparse_1d(self, x, frame, height, width, pad_len):
@@ -445,8 +429,6 @@ class OpenSoraAttnProcessor2_0:
         head_dim = inner_dim // attn.heads
         FA_head_num = attn.heads
         total_frame = frame
-        # print(f'batch: {batch_size}, FA_head_num: {FA_head_num}, head_dim: {head_dim}, total_frame:{total_frame}')
-        # print(f'q {query.shape}, k {key.shape}, v {value.shape}')
 
         if get_sequence_parallel_state(): #TODO: to test
             sp_size = hccl_info.world_size
@@ -492,33 +474,25 @@ class OpenSoraAttnProcessor2_0:
             
         # print(f'q {query.shape}, k {key.shape}, v {value.shape}') #(SBH) 
 
-        # print(f"sparse1d={self.sparse1d}, sparse_n={self.sparse_n}")
         if self.sparse1d:
-            # print("if sparse1d")
             query, pad_len = self._sparse_1d(query, total_frame, height, width)
             if self.is_cross_attn:
-                # print("if is_cross_attn")
-                key = self._sparse_1d_kv(key)
+                key = self._sparse_1d_kv(key) 
                 value = self._sparse_1d_kv(value)
             else:
-                # print("if not is_cross_attn")
                 key, pad_len = self._sparse_1d(key, total_frame, height, width)
                 value, pad_len = self._sparse_1d(value, total_frame, height, width)
-            # print(f'after sparse q {query.shape}, k {key.shape}, v {value.shape}, pad_len {pad_len}')
 
 
         # print(f'q {query.shape}, k {key.shape}, v {value.shape}')
         query = query.swapaxes(0, 1)  # SBH to BSH
         key = key.swapaxes(0, 1)
         value = value.swapaxes(0, 1)
-        # print(f'after swapaxes q {query.shape}, k {key.shape}, v {value.shape}') #(BSH) 
-        # print(f"attention_mask.shape {attention_mask.shape}")
         if self.attention_mode == "math":
             # FIXME: shape error
             hidden_states = self.run_math_attention(attn, query, key, value, attention_mask)
         elif self.attention_mode == "xformers":
             hidden_states = self.run_ms_flash_attention(attn, query, key, value, attention_mask)
-        # print(f"hidden_states.shape {hidden_states.shape}") # BSH
         # if npu_config is not None:
         #     hidden_states = npu_config.run_attention(query, key, value, attention_mask, "SBH", head_dim, FA_head_num)
         # else:
@@ -535,11 +509,9 @@ class OpenSoraAttnProcessor2_0:
         #     hidden_states = rearrange(hidden_states, 'b h s d -> s b (h d)', h=FA_head_num)
 
         if self.sparse1d:
-            # print("if sparse1d: _reverse_sparse_1d") 
             hidden_states = hidden_states.swapaxes(0, 1) # BSH -> SBH
             hidden_states = self._reverse_sparse_1d(hidden_states, total_frame, height, width, pad_len)
             hidden_states = hidden_states.swapaxes(0, 1) # SBH -> BSH
-            # print(f"after _reverse_sparse_1d: hidden_states.shape {hidden_states.shape}") 
 
         # [s, b, h // sp * d] -> [s // sp * b, h, d] -> [s // sp, b, h * d]
         if get_sequence_parallel_state():
@@ -554,8 +526,6 @@ class OpenSoraAttnProcessor2_0:
         hidden_states = attn.to_out[1](hidden_states)
 
         hidden_states = hidden_states / attn.rescale_output_factor
-
-        # print(f"Processor output: hidden_states.shape={hidden_states.shape}")
 
         return hidden_states
 
@@ -668,13 +638,9 @@ class BasicTransformerBlock(nn.Cell):
                 self.scale_shift_table[None] + timestep.reshape(batch_size, 6, -1), 6, dim=1
             )        
 
-        print(f"hidden_states {hidden_states.shape}")
         norm_hidden_states = self.norm1(hidden_states)
-        print(f"norm1: norm_hidden_states {norm_hidden_states.shape}")
 
         norm_hidden_states = norm_hidden_states * (1 + scale_msa) + shift_msa
-        
-        print(f"Before Attn1: norm_hidden_states {norm_hidden_states.shape}")
 
         attn_output = self.attn1(
             norm_hidden_states,
@@ -683,7 +649,6 @@ class BasicTransformerBlock(nn.Cell):
         )
 
         attn_output = gate_msa * attn_output
-        print(f"After Attn1: attn_output {attn_output.shape}, hidden_states {hidden_states.shape}")
 
         hidden_states = attn_output + hidden_states
         if hidden_states.ndim == 4:
@@ -697,6 +662,7 @@ class BasicTransformerBlock(nn.Cell):
             encoder_hidden_states=encoder_hidden_states,
             attention_mask=encoder_attention_mask, frame=frame, height=height, width=width,
         )
+
         hidden_states = attn_output + hidden_states
 
         # 4. Feed-forward

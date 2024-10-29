@@ -392,7 +392,12 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
         self, hidden_states, timestep, embedded_timestep, num_frames, height, width
     ):  
         shift, scale = (self.scale_shift_table[None] + embedded_timestep[:, None]).chunk(2, axis=1)
-        hidden_states = self.norm_out(hidden_states)
+        hidden_states = self.norm_out(hidden_states) #BSH -> BSH
+        hidden_states = hidden_states.squeeze(1) if hidden_states.shape[1] == 1 else hidden_states
+
+        # Modulation
+        hidden_states = hidden_states * (1 + scale) + shift
+        hidden_states = self.proj_out(hidden_states)
         hidden_states = hidden_states.squeeze(1) if hidden_states.shape[1] == 1 else hidden_states
 
         # unpatchify

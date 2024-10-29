@@ -255,8 +255,6 @@ class OpenSoraPipeline(DiffusionPipeline):
                 )
 
             prompt_attention_mask = ms.Tensor(text_inputs.attention_mask)
-            print("text_input_ids.shape", text_input_ids.shape)
-            print("prompt_attention_mask.shape", prompt_attention_mask.shape)
             prompt_embeds = self.text_encoding_func(text_encoder, text_input_ids, attention_mask=prompt_attention_mask)
             prompt_embeds = prompt_embeds[0] if isinstance(prompt_embeds, (list, tuple)) else prompt_embeds
 
@@ -672,7 +670,8 @@ class OpenSoraPipeline(DiffusionPipeline):
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
-
+                
+                # print(f"t {t}:, latents {latents.shape}")
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = ops.cat([latents] * 2) if self.do_classifier_free_guidance else latents
                 if not isinstance(self.scheduler, FlowMatchEulerDiscreteScheduler):
@@ -711,7 +710,7 @@ class OpenSoraPipeline(DiffusionPipeline):
 
                 noise_pred = ops.stop_gradient(
                         self.transformer(
-                        latent_model_input,
+                        latent_model_input, # (b c t h w)
                         attention_mask=attention_mask, 
                         encoder_hidden_states=prompt_embeds,
                         encoder_attention_mask=prompt_attention_mask,
@@ -719,8 +718,8 @@ class OpenSoraPipeline(DiffusionPipeline):
                         pooled_projections=prompt_embeds_2,
                         return_dict=False,
                     )
-                )
-                assert not ops.any(ops.isnan(noise_pred))
+                ) # b,c,t,h,w 
+                assert not ops.any(ops.isnan(noise_pred.float())) 
                 # perform guidance
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -760,7 +759,7 @@ class OpenSoraPipeline(DiffusionPipeline):
             latents = ops.cat(latents_list, axis=2)
         # ==================make sp=====================================
 
-        if not output_type == "latent":
+        if not output_type == "latents":
             videos = self.decode_latents(latents)
             videos = videos[:, :num_frames, :height, :width]
         else:

@@ -18,7 +18,8 @@ python opensora/sample/sample_v1_3.py \
     --sample_method EulerAncestralDiscrete \
     --num_samples_per_prompt 1 \
     --rescale_betas_zero_snr \
-    --prediction_type "v_prediction"
+    --prediction_type "v_prediction" \
+    --mode 1
 
 
     # --ae  \

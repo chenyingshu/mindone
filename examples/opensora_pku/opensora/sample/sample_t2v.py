@@ -23,8 +23,8 @@ from opensora.dataset.text_dataset import create_dataloader
 from opensora.models.causalvideovae import CausalVAEModelWrapper, ae_stride_config
 from opensora.models.causalvideovae.model.modules.updownsample import TrilinearInterpolate
 from opensora.models.diffusion.opensora.modeling_opensora_v1_2 import LayerNorm, OpenSoraT2V
-from opensora.models.diffusion.opensora.modules import Attention
-from opensora.sample.pipeline_opensora import OpenSoraPipeline
+from opensora.models.diffusion.opensora.modules_v1_2 import Attention
+from opensora.sample.pipeline_opensora_v1_2 import OpenSoraPipeline
 from opensora.utils.message_utils import print_banner
 from opensora.utils.ms_utils import init_env
 from opensora.utils.utils import _check_cfgs_in_parser, get_precision
