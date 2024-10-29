@@ -14,16 +14,18 @@ from tqdm import tqdm
 import mindspore as ms
 from mindspore import nn
 
+
 # TODO: remove in future when mindone is ready for install
 mindone_lib_path = os.path.abspath("../../")
 sys.path.insert(0, mindone_lib_path)
 sys.path.append(os.path.abspath("./"))
+from opensora.npu_config import npu_config
 from opensora.acceleration.parallel_states import get_sequence_parallel_state, hccl_info
 from opensora.dataset.text_dataset import create_dataloader
 from opensora.utils.message_utils import print_banner
 from opensora.utils.ms_utils import init_env
 from opensora.utils.utils import _check_cfgs_in_parser, get_precision
-from opensora.models.causalvideovae import ae_stride_config, CausalVAEModelWrapper
+from opensora.models.causalvideovae import ae_stride_config, ae_wrapper
 # from opensora.sample.caption_refiner import OpenSoraCaptionRefiner #TODO
 from opensora.models.causalvideovae.model.modules.updownsample import TrilinearInterpolate
 from examples.opensora_pku.opensora.models.diffusion.opensora.modeling_opensora import LayerNorm, OpenSoraT2V_v1_3
@@ -104,7 +106,7 @@ def parse_args():
     parser.add_argument("--caption_refiner", type=str, default=None)
     parser.add_argument("--enhance_video", type=str, default=None)
     parser.add_argument("--text_encoder_name_1", type=str, default='DeepFloyd/t5-v1_1-xxl', help="google/mt5-xxl, DeepFloyd/t5-v1_1-xxl")
-    parser.add_argument("--text_encoder_name_2", type=str, default=None, help="laion/CLIP-ViT-bigG-14-laion2B-39B-b160k, openai/clip-vit-large-patch14")
+    parser.add_argument("--text_encoder_name_2", type=str, default=None, help=" openai/clip-vit-large-patch14, (laion/CLIP-ViT-bigG-14-laion2B-39B-b160k)")
     parser.add_argument("--num_samples_per_prompt", type=int, default=1)
     parser.add_argument('--refine_caption', action='store_true')
     # parser.add_argument('--compile', action='store_true')
@@ -253,27 +255,43 @@ def parse_args():
 
 
 def prepare_pipeline(args):
-    
     # VAE model initiate and weight loading
     print_banner("vae init")
-    vae = CausalVAEModelWrapper(args.ae_path, cache_dir=args.cache_dir, use_safetensors=True) #TODO
+    vae_dtype = get_precision(args.vae_precision)
+    if args.ms_checkpoint is not None and os.path.exists(args.ms_checkpoint):
+        logger.info(f"Run inference with MindSpore checkpoint {args.ms_checkpoint}")
+        state_dict = ms.load_checkpoint(args.ms_checkpoint)
+        # rm 'network.' prefix
+        state_dict = dict(
+            [k.replace("network.", "") if k.startswith("network.") else k, v] for k, v in state_dict.items()
+        )
+    else:
+        state_dict = None
+    kwarg = {
+        "state_dict": state_dict,
+        "use_safetensors": True,
+        "dtype": vae_dtype,
+    }
+    vae = ae_wrapper[args.ae](args.ae_path, **kwarg)
     vae.vae_scale_factor = ae_stride_config[args.ae]
     if args.enable_tiling:
         vae.vae.enable_tiling()
+        vae.vae.tile_overlap_factor = args.tile_overlap_factor
+
     ## use amp level O2 for causal 3D VAE with bfloat16 or float16
-    vae_dtype = get_precision(args.vae_precision)
     if vae_dtype == ms.float16:
         custom_fp32_cells = [nn.GroupNorm] if args.vae_keep_gn_fp32 else []
     else:
         custom_fp32_cells = [nn.AvgPool2d, TrilinearInterpolate]
-    vae = auto_mixed_precision(vae, amp_level="O2", dtype=vae_dtype, custom_fp32_cells=custom_fp32_cells)
     logger.info(f"Use amp level O2 for causal 3D VAE with dtype={vae_dtype}, custom_fp32_cells: {custom_fp32_cells}")
+    vae = auto_mixed_precision(vae, amp_level="O2", dtype=vae_dtype, custom_fp32_cells=custom_fp32_cells)
+    
     vae.set_train(False)
     for param in vae.get_parameters():  # freeze vae
         param.requires_grad = False    
     
     if args.decode_latents:
-        print("To decode latents, skipped loading text endoers and transformer")
+        print("To decode latents directly, skipped loading text endoers and transformer")
         return vae
     
     # Build text encoders
@@ -307,8 +325,8 @@ def prepare_pipeline(args):
             output_loading_info=True,
             use_safetensors=True,
             )
-        # loading_info.pop("unexpected_keys")  # Only load text model, ignore vision model
-        logger.info(f"Loaded CLIP Encoder: {loading_info}")
+        loading_info.pop("unexpected_keys")  # only load text model, ignore vision model
+        logger.info(f"Loaded CLIP Encoder: {loading_info}") # Note: missed keys when loading open-clip models
         text_encoder_2 = text_encoder_2.set_train(False)
         tokenizer_2 = AutoTokenizer.from_pretrained(
             args.text_encoder_name_2, cache_dir=args.cache_dir
@@ -409,7 +427,6 @@ def prepare_pipeline(args):
     transformer_model = transformer_model.set_train(False)
     for param in transformer_model.get_parameters():  # freeze transformer_model
         param.requires_grad = False
-    # print("transformer_model.config", transformer_model.config)
 
     # Build scheduler
     scheduler = get_scheduler(args)
@@ -456,9 +473,7 @@ def prepare_pipeline(args):
 
     return pipeline
 
-def run_model_and_save_samples(args, pipeline, caption_refiner_model=None, enhance_video_model=None):
-
-    video_grids = []
+def run_model_and_save_samples(args, pipeline, rank_id, device_num, caption_refiner_model=None, enhance_video_model=None):
 
     # Handle input text prompts
     print_banner("text prompts loading")
@@ -466,8 +481,6 @@ def run_model_and_save_samples(args, pipeline, caption_refiner_model=None, enhan
         f"{args.video_extension}" if not (args.save_latents or args.decode_latents) else "npy"
     )  # save video as gif or save denoised latents as npy files.
     ext = "jpg" if args.num_frames == 1 else ext
-    print(f"ext {ext}")
-
     if not isinstance(args.text_prompt, list):
         args.text_prompt = [args.text_prompt]
     # if input is a text file, where each line is a caption, load it into a list
@@ -515,7 +528,7 @@ def run_model_and_save_samples(args, pipeline, caption_refiner_model=None, enhan
     # Decode latents directly
     if args.decode_latents:
         print("Directly decoding latents...")
-        assert isinstance(pipeline, CausalVAEModelWrapper)
+        assert isinstance(pipeline, ae_wrapper[args.ae])
         vae = pipeline
         for step, data in tqdm(enumerate(ds_iter), total=dataset_size):
             file_paths = data["file_path"]
@@ -636,7 +649,6 @@ def run_model_and_save_samples(args, pipeline, caption_refiner_model=None, enhan
             # save result
             for i_sample in range(args.batch_size):
                 file_path = os.path.join(save_dir, file_paths[i_sample])
-                print(f"Saving to {file_path}...")
                 assert ext in file_path, f"Only support saving as {ext} files, but got {file_path}."
                 if args.save_latents:
                     np.save(file_path, videos[i_sample : i_sample + 1])
@@ -680,27 +692,27 @@ if __name__ == "__main__":
     save_dir = args.save_img_path
     os.makedirs(save_dir, exist_ok=True)
     set_logger(name="", output_dir=save_dir)
-    # dtype = ms.float16
-
+    
     # 1. init environment
-    rank_id, device_num = init_env(
-        args.mode,
-        seed=args.seed,
-        distributed=args.use_parallel,
-        device_target=args.device,
-        max_device_memory=args.max_device_memory,
-        parallel_mode=args.parallel_mode,
-        precision_mode=args.precision_mode,
-        global_bf16=args.global_bf16,
-        sp_size=args.sp_size,
-        jit_level=args.jit_level,
-        jit_syntax_level=args.jit_syntax_level,
-    )
+    rank_id, device_num = npu_config.set_npu_env(args)
+    # rank_id, device_num = init_env(
+    #     args.mode,
+    #     seed=args.seed,
+    #     distributed=args.use_parallel,
+    #     device_target=args.device,
+    #     max_device_memory=args.max_device_memory,
+    #     parallel_mode=args.parallel_mode,
+    #     precision_mode=args.precision_mode,
+    #     global_bf16=args.global_bf16,
+    #     sp_size=args.sp_size,
+    #     jit_level=args.jit_level,
+    #     jit_syntax_level=args.jit_syntax_level,
+    # )
     
     # 2. build models and pipeline
     if args.num_frames != 1 and args.enhance_video is not None:
         from opensora.sample.VEnhancer.enhance_a_video import VEnhancer
-        enhance_video_model = VEnhancer(model_path=args.enhance_video, version='v2', device=device)
+        enhance_video_model = VEnhancer(model_path=args.enhance_video, version='v2', device=args.device)
     else:
         enhance_video_model = None
     pipeline = prepare_pipeline(args)
@@ -713,7 +725,7 @@ if __name__ == "__main__":
 
     # 3. inference
     start_time = time.time()
-    run_model_and_save_samples(args, pipeline, caption_refiner_model, enhance_video_model)
+    run_model_and_save_samples(args, pipeline, rank_id, device_num, caption_refiner_model, enhance_video_model)
     end_time = time.time()
     time_cost = end_time - start_time
     logger.info(f"Inference time cost: {time_cost:0.3f}s")
