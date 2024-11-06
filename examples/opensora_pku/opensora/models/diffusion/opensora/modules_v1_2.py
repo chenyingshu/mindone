@@ -17,7 +17,7 @@ from mindone.diffusers.models.embeddings import SinusoidalPositionalEmbedding
 from mindone.diffusers.models.normalization import AdaLayerNorm, AdaLayerNormContinuous, AdaLayerNormZero
 from mindone.utils.version_control import check_valid_flash_attention, choose_flash_attention_dtype
 
-from .rope import PositionGetter3D, RoPE3D
+from ..common import PositionGetter3D, RoPE3D
 
 logger = logging.getLogger(__name__)
 

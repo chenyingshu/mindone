@@ -7,6 +7,35 @@ import mindspore as ms
 from mindspore import mint, nn, ops
 
 
+# V1.3, Different from v1.2
+class PatchEmbed2D(nn.Cell):
+    """2D Image to Patch Embedding but with video"""
+
+    def __init__(
+        self,
+        patch_size=16, #2
+        in_channels=3, #8
+        embed_dim=768, # 24*96=2304
+        bias=True,
+    ):
+        super().__init__()
+        self.proj = nn.Conv2d(
+            in_channels, embed_dim, 
+            kernel_size=(patch_size, patch_size), stride=(patch_size, patch_size),  has_bias=bias, pad_mode="pad"
+        )
+
+    def construct(self, latent):
+        b, c, t, h, w = latent.shape # b, c=in_channels, t, h, w
+        # b c t h w -> (b t) c h w
+        latent = latent.swapaxes(1, 2).reshape(b*t, c, h, w) # b*t, c, h, w
+        latent = self.proj(latent)  # b*t, embed_dim, h, w
+        # (b t) c h w -> b (t h w) c
+        _, c, h, w = latent.shape
+        latent = latent.reshape(b, -1, c, h, w).permute(0, 1, 3, 4, 2).reshape(b, -1, c) # b, t*h*w, embed_dim
+        
+        return latent
+
+
 class PositionGetter3D(object):
     """return positions of patches"""
 
@@ -22,7 +51,6 @@ class PositionGetter3D(object):
         pos = list(itertools.product(z, y, x))
         pos = ms.Tensor(pos)
         if get_sequence_parallel_state():
-            # print('PositionGetter3D', PositionGetter3D)
             pos = pos.reshape(t * h * w, 3).swapaxes(0, 1).reshape(3, -1, 1).broadcast_to((3, -1, b))
         else:
             pos = pos.reshape(t * h * w, 3).swapaxes(0, 1).reshape(3, 1, -1).broadcast_to((3, b, -1))
@@ -92,7 +120,6 @@ class RoPE3D(nn.Cell):
         cos_y, sin_y = self.get_cos_sin(max_poses[1] + 1, self.interpolation_scale_h)
         cos_x, sin_x = self.get_cos_sin(max_poses[2] + 1, self.interpolation_scale_w)
         # split features into three along the feature dimension, and apply rope1d on each half
-        # t, y, x = tokens.chunk(3, dim=-1)
         t, y, x = mint.chunk(tokens, 3, dim=-1)
         t = self.apply_rope1d(t, poses[0], cos_t.to(tokens.dtype), sin_t.to(tokens.dtype))
         y = self.apply_rope1d(y, poses[1], cos_y.to(tokens.dtype), sin_y.to(tokens.dtype))

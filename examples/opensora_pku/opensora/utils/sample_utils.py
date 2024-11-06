@@ -15,11 +15,15 @@ import mindspore as ms
 from mindspore import nn
 
 
-# TODO: remove in future when mindone is ready for install
-mindone_lib_path = os.path.abspath("../../")
-sys.path.insert(0, mindone_lib_path)
-sys.path.append(os.path.abspath("./"))
-from opensora.npu_config import npu_config
+from mindone.diffusers import (
+    DDIMScheduler, DDPMScheduler, PNDMScheduler,
+    EulerDiscreteScheduler, DPMSolverMultistepScheduler,
+    HeunDiscreteScheduler, EulerAncestralDiscreteScheduler,
+    DEISMultistepScheduler, KDPM2AncestralDiscreteScheduler, 
+    DPMSolverSinglestepScheduler, #CogVideoXDDIMScheduler, 
+    FlowMatchEulerDiscreteScheduler
+    )
+
 from opensora.acceleration.parallel_states import get_sequence_parallel_state, hccl_info
 from opensora.dataset.text_dataset import create_dataloader
 from opensora.utils.message_utils import print_banner
@@ -29,8 +33,9 @@ from opensora.models.causalvideovae import ae_stride_config, ae_wrapper
 # from opensora.sample.caption_refiner import OpenSoraCaptionRefiner
 from opensora.models.causalvideovae.model.modules.updownsample import TrilinearInterpolate
 from examples.opensora_pku.opensora.models.diffusion.opensora.modeling_opensora import LayerNorm, OpenSoraT2V_v1_3
-from examples.opensora_pku.opensora.models.diffusion.opensora.modules import Attention
+from examples.opensora_pku.opensora.models.diffusion.opensora.modules import Attention, BasicTransformerBlock
 from opensora.sample.pipeline_opensora import OpenSoraPipeline
+from opensora.models.diffusion.common import PatchEmbed2D
 
 from mindone.diffusers.models.embeddings import PixArtAlphaCombinedTimestepSizeEmbeddings
 from mindone.diffusers import (
@@ -46,16 +51,12 @@ from transformers import AutoTokenizer, MT5Tokenizer
 
 from mindone.utils.amp import auto_mixed_precision
 from mindone.utils.config import str2bool
-from mindone.utils.logger import set_logger
 from mindone.utils.params import count_params
 from mindone.visualize.videos import save_videos
 from mindone.diffusers.training_utils import set_seed
 
 logger = logging.getLogger(__name__)
 
-ms.set_context(pynative_synchronize=True)
-
-# Copied from opensora.utils sample_utils.py
 def get_scheduler(args):
     kwargs = dict(
         prediction_type=args.prediction_type, 
@@ -100,7 +101,497 @@ def get_scheduler(args):
     scheduler = scheduler_cls(**kwargs)
     return scheduler
 
-def parse_args():
+
+
+def prepare_pipeline(args):
+    # VAE model initiate and weight loading
+    print_banner("vae init")
+    vae_dtype = get_precision(args.vae_precision)
+    if args.ms_checkpoint is not None and os.path.exists(args.ms_checkpoint):
+        logger.info(f"Run inference with MindSpore checkpoint {args.ms_checkpoint}")
+        state_dict = ms.load_checkpoint(args.ms_checkpoint)
+        # rm 'network.' prefix
+        state_dict = dict(
+            [k.replace("network.", "") if k.startswith("network.") else k, v] for k, v in state_dict.items()
+        )
+    else:
+        state_dict = None
+    kwarg = {
+        "state_dict": state_dict,
+        "use_safetensors": True,
+        "dtype": vae_dtype,
+    }
+    vae = ae_wrapper[args.ae](args.ae_path, **kwarg)
+    vae.vae_scale_factor = ae_stride_config[args.ae]
+    if args.enable_tiling:
+        vae.vae.enable_tiling()
+        vae.vae.tile_overlap_factor = args.tile_overlap_factor
+
+    ## use amp level O2 for causal 3D VAE with bfloat16 or float16
+    if vae_dtype == ms.float16:
+        custom_fp32_cells = [nn.GroupNorm] if args.vae_keep_gn_fp32 else []
+    else:
+        custom_fp32_cells = [nn.AvgPool2d, TrilinearInterpolate]
+    logger.info(f"Use amp level O2 for causal 3D VAE with dtype={vae_dtype}, custom_fp32_cells: {custom_fp32_cells}")
+    vae = auto_mixed_precision(vae, amp_level="O2", dtype=vae_dtype, custom_fp32_cells=custom_fp32_cells)
+    
+    vae.set_train(False)
+    for param in vae.get_parameters():  # freeze vae
+        param.requires_grad = False    
+    
+    if args.decode_latents:
+        print("To decode latents directly, skipped loading text endoers and transformer")
+        return vae
+    
+    # Build text encoders
+    print_banner("text encoder init")
+    text_encoder_dtype = get_precision(args.text_encoder_precision)
+    if args.saved_prompt1_dir is not None and os.path.isfile(args.saved_prompt1_dir): # TODO debug use delete later
+        print("Skip loading text encoder, directly load saved embeddings")
+        text_encoder_1 = None
+    else:
+        if 'mt5' in args.text_encoder_name_1:
+            text_encoder_1, loading_info = MT5EncoderModel.from_pretrained(
+                args.text_encoder_name_1, 
+                cache_dir=args.cache_dir, 
+                output_loading_info=True,
+                mindspore_dtype=text_encoder_dtype,
+                use_safetensors=True
+                )      
+            # loading_info.pop("unexpected_keys")  # decoder weights are ignored
+            # logger.info(f"Loaded MT5 Encoder: {loading_info}")
+            text_encoder_1 = text_encoder_1.set_train(False)  
+        else:
+            text_encoder_1 = T5EncoderModel.from_pretrained(
+                args.text_encoder_name_1, cache_dir=args.cache_dir, 
+                mindspore_dtype=text_encoder_dtype
+                ).set_train(False)
+    tokenizer_1 = AutoTokenizer.from_pretrained(
+        args.text_encoder_name_1, cache_dir=args.cache_dir
+        )
+
+    if args.text_encoder_name_2 is not None:
+        text_encoder_2, loading_info = CLIPTextModelWithProjection.from_pretrained(
+            args.text_encoder_name_2, 
+            cache_dir=args.cache_dir, 
+            mindspore_dtype=text_encoder_dtype,
+            output_loading_info=True,
+            use_safetensors=True,
+            )
+        # loading_info.pop("unexpected_keys")  # only load text model, ignore vision model
+        # loading_info.pop("mising_keys") # Note: missed keys when loading open-clip models
+        # logger.info(f"Loaded CLIP Encoder: {loading_info}") 
+        text_encoder_2 = text_encoder_2.set_train(False)
+        tokenizer_2 = AutoTokenizer.from_pretrained(
+            args.text_encoder_name_2, cache_dir=args.cache_dir
+            )
+    else:
+        text_encoder_2, tokenizer_2 = None, None
+
+    # Build transformer
+    print_banner("transformer model init")
+    FA_dtype = get_precision(args.precision) if get_precision(args.precision) != ms.float32 else ms.bfloat16
+    assert args.model_type == "dit", "Currently only suppport model_type as 'dit'@"
+    if args.ms_checkpoint is not None and os.path.exists(args.ms_checkpoint):
+        logger.info(f"Initiate from MindSpore checkpoint file {args.ms_checkpoint}")
+        state_dict = ms.load_checkpoint(args.ms_checkpoint)
+        # rm 'network.' prefix
+        state_dict = dict(
+            [k.replace("network.", "") if k.startswith("network.") else k, v] for k, v in state_dict.items()
+        )
+    else:
+        state_dict = None
+    model_version = args.model_path.split("/")[-1]
+    if (args.version != 'v1_3') and (model_version.split("x")[0][:3] != "any"):
+        if int(model_version.split("x")[0]) != args.num_frames:
+            logger.warning(
+                f"Detect that the loaded model version is {model_version}, but found a mismatched number of frames {model_version.split('x')[0]}"
+            )
+        if int(model_version.split("x")[1][:-1]) != args.height:
+            logger.warning(
+                f"Detect that the loaded model version is {model_version}, but found a mismatched resolution {args.height}x{args.width}"
+            )
+    elif (args.version == 'v1_3') and (model_version.split("x")[0] == "any93x640x640"): # TODO: currently only release one model
+        if (args.height % 32 != 0) or (args.width % 32 != 0):
+            logger.warning(
+                f"Detect that the loaded model version is {model_version}, but found a mismatched resolution {args.height}x{args.width}. The resolution of the inference should be a multiple of 32."
+            )
+        if (args.num_frames - 1) % 4 != 0:
+            logger.warning(
+                    f"Detect that the loaded model version is {model_version}, but found a mismatched number of frames {args.num_frames}. Frames needs to be 4n+1, e.g. 93, 77, 61, 45, 29, 1 (image)"
+                )
+ 
+    if args.version == 'v1_3':
+        # TODO
+        # if args.model_type == 'inpaint' or args.model_type == 'i2v':
+        #     transformer_model = OpenSoraInpaint_v1_3.from_pretrained(
+        #         args.model_path, cache_dir=args.cache_dir,
+        #         device_map=None, mindspore_dtype=weight_dtype
+        #         ).set_train(False)
+        # else:
+        
+        transformer_model, logging_info = OpenSoraT2V_v1_3.from_pretrained(
+            args.model_path, 
+            state_dict=state_dict,
+            cache_dir=args.cache_dir,
+            FA_dtype = FA_dtype,
+            output_loading_info=True, 
+            )
+        # logger.info(transformer_model)
+        logger.info(logging_info)
+    elif args.version == 'v1_5':
+        if args.model_type == 'inpaint' or args.model_type == 'i2v':
+            raise NotImplementedError('Inpainting model is not available in v1_5')
+        else:
+            from opensora.models.diffusion.opensora_v1_5.modeling_opensora import OpenSoraT2V_v1_5
+            transformer_model = OpenSoraT2V_v1_5.from_pretrained(
+                args.model_path, cache_dir=args.cache_dir, 
+                # device_map=None, 
+                mindspore_dtype=weight_dtype
+                )
+    
+    # Mixed precision
+    dtype = get_precision(args.precision)
+    if args.precision in ["fp16", "bf16"]:
+        if not args.global_bf16:
+            amp_level = args.amp_level
+            if dtype == ms.float16:
+                custom_fp32_cells=[
+                    LayerNorm, Attention, PatchEmbed2D, nn.SiLU, nn.GELU, PixArtAlphaCombinedTimestepSizeEmbeddings]
+            else:
+                custom_fp32_cells= [
+                    nn.MaxPool2d,
+                    nn.MaxPool3d, # do not support bf16
+                    PatchEmbed2D, # low precision
+                    LayerNorm,
+                    nn.SiLU,
+                    nn.GELU,
+                    PixArtAlphaCombinedTimestepSizeEmbeddings,
+                ]
+            transformer_model = auto_mixed_precision(
+                transformer_model,
+                amp_level=args.amp_level,
+                dtype=dtype,
+                custom_fp32_cells=custom_fp32_cells
+            )
+            logger.info(
+                f"Set mixed precision to {args.amp_level} with dtype={args.precision}, custom fp32_cells {custom_fp32_cells}"
+            )
+        else:
+            logger.info(f"Using global bf16. Force model dtype from {dtype} to ms.bfloat16")
+            dtype = ms.bfloat16
+    elif args.precision == "fp32":
+        amp_level = "O0"
+    else:
+        raise ValueError(f"Unsupported precision {args.precision}")
+    transformer_model = transformer_model.set_train(False)
+    for param in transformer_model.get_parameters():  # freeze transformer_model
+        param.requires_grad = False
+
+    # Build scheduler
+    scheduler = get_scheduler(args)
+    
+    # Build inference pipeline
+    # pipeline_class = OpenSoraInpaintPipeline if args.model_type == 'inpaint' or args.model_type == 'i2v' else OpenSoraPipeline
+    pipeline_class = OpenSoraPipeline
+
+    pipeline = pipeline_class(
+        vae=vae,
+        text_encoder=text_encoder_1,
+        tokenizer=tokenizer_1,
+        scheduler=scheduler,
+        transformer=transformer_model, 
+        text_encoder_2=text_encoder_2,
+        tokenizer_2=tokenizer_2,
+    )
+
+    if args.save_memory: #TODO: Susan comment: I am not sure yet
+        print('enable_model_cpu_offload AND enable_sequential_cpu_offload AND enable_tiling')
+        pipeline.enable_model_cpu_offload()
+        pipeline.enable_sequential_cpu_offload()
+        if not args.enable_tiling:
+            vae.vae.enable_tiling()
+        vae.vae.t_chunk_enc = 8
+        vae.vae.t_chunk_dec = vae.vae.t_chunk_enc // 2
+
+    # Print key info
+    num_params_vae, num_params_vae_trainable = count_params(vae)
+    num_params_latte, num_params_latte_trainable = count_params(transformer_model)
+    num_params = num_params_vae + num_params_latte
+    num_params_trainable = num_params_vae_trainable + num_params_latte_trainable
+    key_info = "Key Settings:\n" + "=" * 50 + "\n"
+    key_info += "\n".join(
+        [
+            f"MindSpore mode[GRAPH(0)/PYNATIVE(1)]: {args.mode}",
+            f"Jit level: {args.jit_level}",
+            f"Num of samples: {len(args.text_prompt)}",
+            f"Num params: {num_params:,} (latte: {num_params_latte:,}, vae: {num_params_vae:,})",
+            f"Num trainable params: {num_params_trainable:,}",
+            f"Transformer dtype: {dtype}",
+            f"VAE dtype: {vae_dtype}",
+            f"Text encoder dtype: {text_encoder_dtype}",
+            f"Sampling steps {args.num_sampling_steps}",
+            f"Sampling method: {args.sample_method}",
+            f"CFG guidance scale: {args.guidance_scale}",
+            f"FA dtype: {FA_dtype}",
+            f"Inference shape (num_frames x height x width): {args.num_frames}x{args.height}x{args.width}",
+        ]
+    )
+    key_info += "\n" + "=" * 50
+    logger.info(key_info)
+
+    return pipeline
+
+## See npu_config.py set_npu_env()
+# def init_npu_env(args):
+#     local_rank = int(os.getenv('RANK', 0))
+#     world_size = int(os.getenv('WORLD_SIZE', 1))
+#     args.local_rank = local_rank
+#     args.world_size = world_size
+#     torch_npu.npu.set_device(local_rank)
+#     dist.init_process_group(
+#         backend='hccl', init_method='env://', 
+#         world_size=world_size, rank=local_rank
+#         )
+#     if args.sp:
+#         initialize_sequence_parallel_state(world_size)
+#     return args
+
+
+def run_model_and_save_samples(args, pipeline, rank_id, device_num, save_dir, caption_refiner_model=None, enhance_video_model=None):
+    if args.seed is not None:
+        set_seed(args.seed, rank=rank_id)
+
+    # Handle input text prompts
+    print_banner("text prompts loading")
+    ext = (
+        f"{args.video_extension}" if not args.save_latents else "npy" # or args.decode_latents)
+    )  # save video as gif or save denoised latents as npy files.
+    ext = "jpg" if args.num_frames == 1 else ext
+    if not isinstance(args.text_prompt, list):
+        args.text_prompt = [args.text_prompt]
+    # if input is a text file, where each line is a caption, load it into a list
+    if len(args.text_prompt) == 1 and args.text_prompt[0].endswith("txt"):
+        captions = open(args.text_prompt[0], "r").readlines()
+        args.text_prompt = [i.strip() for i in captions]
+    if len(args.text_prompt) == 1 and args.text_prompt[0].endswith("csv"):
+        captions = pd.read_csv(args.text_prompt[0])
+        args.text_prompt = [i.strip() for i in captions["cap"]]
+    n = len(args.text_prompt)
+    assert n > 0, "No captions provided"
+    logger.info(f"Number of prompts: {n}")
+    logger.info(f"Number of generated samples for each prompt {args.num_videos_per_prompt}")
+
+    # Create dataloader for the captions
+    csv_file = {"path": [], "cap": []}
+    for i in range(n):
+        for i_video in range(args.num_videos_per_prompt):
+            csv_file["path"].append(f"{i_video}-{args.text_prompt[i].strip()[:100]}.{ext}")
+            csv_file["cap"].append(args.text_prompt[i])
+    temp_dataset_csv = os.path.join(save_dir, "dataset.csv")
+    pd.DataFrame.from_dict(csv_file).to_csv(temp_dataset_csv, index=False, columns=csv_file.keys())
+
+    ds_config = dict(
+        data_file_path=temp_dataset_csv,
+        tokenizer=None,  # tokenizer,
+        file_column="path",
+        caption_column="cap",
+    )
+    dataset = create_dataloader(
+        ds_config,
+        args.batch_size,
+        ds_name="text",
+        num_parallel_workers=12,
+        max_rowsize=32,
+        shuffle=False,  # be in order
+        device_num=device_num if not get_sequence_parallel_state() else (device_num // hccl_info.world_size),
+        rank_id=rank_id if not get_sequence_parallel_state() else hccl_info.group_id,
+        drop_remainder=False,
+    )
+    dataset_size = dataset.get_dataset_size()
+    logger.info(f"Num batches: {dataset_size}")
+    ds_iter = dataset.create_dict_iterator(1, output_numpy=True)
+
+    # Decode latents directly
+    if args.decode_latents: #TODO test
+        print("Directly decoding latents...")
+        assert isinstance(pipeline, ae_wrapper[args.ae])
+        vae = pipeline
+        for step, data in tqdm(enumerate(ds_iter), total=dataset_size):
+            file_paths = data["file_path"]
+            loaded_latents = []
+            for i_sample in range(args.batch_size):
+                print(f"i_sample {i_sample}")
+                # save_fp = os.path.join(save_dir, file_paths[i_sample])
+                save_fp = "./prompt_0_latents.npy"
+                assert os.path.exists(
+                    save_fp
+                ), f"{save_fp} does not exist! Please check the npy files under {save_dir} or check if you run `--save_latents` ahead."
+                loaded_latents.append(np.load(save_fp))
+            loaded_latents = (
+                np.stack(loaded_latents) if loaded_latents[0].ndim == 4 else np.concatenate(loaded_latents, axis=0)
+            )
+            print(f"loaded_latents {loaded_latents.shape}")
+            decode_data = (
+                vae.decode(ms.Tensor(loaded_latents)).to(ms.float32).permute(0, 1, 3, 4, 2)
+            )  # (b t c h w) -> (b t h w c)
+            decode_data = ms.ops.clip_by_value(
+                (decode_data + 1.0) / 2.0, clip_value_min=0.0, clip_value_max=1.0
+            ).asnumpy()
+            print(f"decode_data {decode_data.shape} {decode_data.dtype}")
+            for i_sample in range(args.batch_size):
+                print(f"i_sample {i_sample}")
+                # save_fp = os.path.join(save_dir, file_paths[i_sample]).replace(".npy", f".{args.video_extension}")
+                save_fp = "./prompt_0_latents.mp4"
+                save_video_data = decode_data[i_sample : i_sample + 1]
+                save_videos(save_video_data, save_fp, loop=0, fps=args.fps)  # (b t h w c)
+        
+        # Delete files that are no longer needed
+        if os.path.exists(temp_dataset_csv):
+            os.remove(temp_dataset_csv)
+
+        if args.decode_latents:
+            npy_files = glob.glob(os.path.join(save_dir, "*.npy"))
+            for fp in npy_files:
+                os.remove(fp)
+    
+    # TODO
+    # if args.model_type == 'inpaint' or args.model_type == 'i2v':
+    #     if not isinstance(args.conditional_pixel_values_path, list):
+    #         args.conditional_pixel_values_path = [args.conditional_pixel_values_path]
+    #     if len(args.conditional_pixel_values_path) == 1 and args.conditional_pixel_values_path[0].endswith('txt'):
+    #         temp = open(args.conditional_pixel_values_path[0], 'r').readlines()
+    #         conditional_pixel_values_path = [i.strip().split(',') for i in temp]
+    #     mask_type = args.mask_type if args.mask_type is not None else None
+
+    positive_prompt = """
+    high quality, high aesthetic, {}
+    """
+    negative_prompt = """
+    nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, 
+    low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry.
+    """
+    # positive_prompt = (
+    #     "(masterpiece), (best quality), (ultra-detailed), {}. emotional, "
+    #     + "harmonious, vignette, 4k epic detailed, shot on kodak, 35mm photo, sharp focus, high budget, cinemascope, moody, epic, gorgeous"
+    # )
+    # negative_prompt = (
+    #     "nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, "
+    #     + "extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry"
+    # )
+
+    def generate(step, data, ext, conditional_pixel_values_path=None, mask_type=None):
+        
+         
+        if args.caption_refiner is not None:
+            if args.model_type != 'inpaint' and args.model_type != 'i2v':
+                refine_prompt = caption_refiner_model.get_refiner_output(prompt)
+                print(f'\nOrigin prompt: {prompt}\n->\nRefine prompt: {refine_prompt}')
+                prompt = refine_prompt
+            else:
+                # Due to the current use of LLM as the caption refiner, additional content that is not present in the control image will be added. Therefore, caption refiner is not used in this mode.
+                print('Caption refiner is not available for inpainting model, use the original prompt...')
+                time.sleep(3)
+        # TODO 
+        # input_prompt = positive_prompt.format(prompt)
+        # if args.model_type == 'inpaint' or args.model_type == 'i2v':
+        #     print(f'\nConditional pixel values path: {conditional_pixel_values_path}')
+        #     videos = pipeline(
+        #         conditional_pixel_values_path=conditional_pixel_values_path,
+        #         mask_type=mask_type,
+        #         crop_for_hw=args.crop_for_hw,
+        #         max_hxw=args.max_hxw,
+        #         prompt=input_prompt, 
+        #         negative_prompt=negative_prompt, 
+        #         num_frames=args.num_frames,
+        #         height=args.height,
+        #         width=args.width,
+        #         num_inference_steps=args.num_sampling_steps,
+        #         guidance_scale=args.guidance_scale,
+        #         num_samples_per_prompt=args.num_samples_per_prompt,
+        #         max_sequence_length=args.max_sequence_length,
+        #     ).videos
+        # else:
+        prompt = [x for x in data["caption"]]
+        print(f"read prompt data: {prompt}") 
+        file_paths = data["file_path"]
+        input_prompt = positive_prompt.format(prompt[0]) # remove "[]"
+        saved_prompt1_dict = None
+        # TODO debug use delete later
+        if args.saved_prompt1_dir is not None and os.path.isfile(args.saved_prompt1_dir) and (args.saved_prompt1_dir).endswith(".npz"):
+            saved_prompt1_dict = []
+            np_files = np.load(args.saved_prompt1_dir)
+            for key in np_files:
+                saved_prompt1_dict.append(ms.Tensor(np_files[key]))
+        videos = (
+            pipeline(
+                input_prompt, 
+                negative_prompt=negative_prompt, 
+                num_frames=args.num_frames,
+                height=args.height,
+                width=args.width,
+                num_inference_steps=args.num_sampling_steps,
+                guidance_scale=args.guidance_scale,
+                num_samples_per_prompt=args.num_samples_per_prompt,
+                output_type="latents" if args.save_latents else "pil",
+                max_sequence_length=args.max_sequence_length,
+                saved_prompt1_dict=saved_prompt1_dict,
+                saved_prompt1_dir=args.saved_prompt1_dir
+            )
+            .videos.to(ms.float32)
+            .asnumpy()
+        )
+        # if enhance_video_model is not None:
+        #     # b t h w c
+        #     videos = enhance_video_model.enhance_a_video(videos, input_prompt, 2.0, args.fps, 250)
+        if step == 0 and profiler is not None:
+            profiler.stop()
+
+        if get_sequence_parallel_state() and hccl_info.rank % hccl_info.world_size != 0:
+            pass
+        else:
+            # save result
+            for i_sample in range(args.batch_size):
+                file_path = os.path.join(save_dir, file_paths[i_sample])
+                assert ext in file_path, f"Only support saving as {ext} files, but got {file_path}."
+                if args.save_latents:
+                    np.save(file_path, videos[i_sample : i_sample + 1])
+                else:
+                    if args.num_frames == 1:
+                        ext = "jpg"
+                        image = videos[i_sample, 0]  # (b t h w c)  -> (h, w, c)
+                        image = (image * 255).round().clip(0, 255).astype(np.uint8)
+                        Image.fromarray(image).save(file_path)
+                    else:
+                        save_video_data = videos[i_sample : i_sample + 1]  # (b t h w c)
+                        save_videos(save_video_data, file_path, loop=0, fps=args.fps)
+
+    if args.profile:
+        profiler = ms.Profiler(output_path="./mem_info", profile_memory=True)
+        ms.set_context(memory_optimize_level="O0")
+        ms.set_context(pynative_synchronize=True)
+    else:
+        profiler = None
+
+    # Infer
+    # if args.model_type == 'inpaint' or args.model_type == 'i2v':
+    #     for index, (prompt, cond_path) in enumerate(zip(args.text_prompt, conditional_pixel_values_path)):
+    #         if not args.sp and args.local_rank != -1 and index % args.world_size != args.local_rank:
+    #             continue
+    #         generate(prompt, conditional_pixel_values_path=cond_path, mask_type=mask_type)
+    #     print('completed, please check the saved images and videos')
+    # else:
+    for step, data in tqdm(enumerate(ds_iter), total=dataset_size):
+        generate(step, data, ext)
+        break
+    
+    
+    # Delete files that are no longer needed
+    if os.path.exists(temp_dataset_csv):
+        os.remove(temp_dataset_csv)
+
+
+def get_args():
     parser = argparse.ArgumentParser()
     
     parser.add_argument("--version", type=str, default='v1_3', choices=['v1_3', 'v1_5'])
@@ -254,523 +745,3 @@ def parse_args():
     assert not (args.use_parallel and args.num_frames == 1)
 
     return args
-
-
-def prepare_pipeline(args):
-    # VAE model initiate and weight loading
-    print_banner("vae init")
-    vae_dtype = get_precision(args.vae_precision)
-    if args.ms_checkpoint is not None and os.path.exists(args.ms_checkpoint):
-        logger.info(f"Run inference with MindSpore checkpoint {args.ms_checkpoint}")
-        state_dict = ms.load_checkpoint(args.ms_checkpoint)
-        # rm 'network.' prefix
-        state_dict = dict(
-            [k.replace("network.", "") if k.startswith("network.") else k, v] for k, v in state_dict.items()
-        )
-    else:
-        state_dict = None
-    kwarg = {
-        "state_dict": state_dict,
-        "use_safetensors": True,
-        "dtype": vae_dtype,
-    }
-    vae = ae_wrapper[args.ae](args.ae_path, **kwarg)
-    vae.vae_scale_factor = ae_stride_config[args.ae]
-    if args.enable_tiling:
-        vae.vae.enable_tiling()
-        vae.vae.tile_overlap_factor = args.tile_overlap_factor
-
-    ## use amp level O2 for causal 3D VAE with bfloat16 or float16
-    if vae_dtype == ms.float16:
-        custom_fp32_cells = [nn.GroupNorm] if args.vae_keep_gn_fp32 else []
-    else:
-        custom_fp32_cells = [nn.AvgPool2d, TrilinearInterpolate]
-    logger.info(f"Use amp level O2 for causal 3D VAE with dtype={vae_dtype}, custom_fp32_cells: {custom_fp32_cells}")
-    vae = auto_mixed_precision(vae, amp_level="O2", dtype=vae_dtype, custom_fp32_cells=custom_fp32_cells)
-    
-    vae.set_train(False)
-    for param in vae.get_parameters():  # freeze vae
-        param.requires_grad = False    
-    
-    if args.decode_latents:
-        print("To decode latents directly, skipped loading text endoers and transformer")
-        return vae
-    
-    # Build text encoders
-    print_banner("text encoder init")
-    text_encoder_dtype = get_precision(args.text_encoder_precision)
-    if os.path.isfile(args.saved_prompt1_dir): # TODO debug use delete later
-        print("Skip loading text encoder, directly load saved embeddings")
-        text_encoder_1 = None
-    else:
-        if 'mt5' in args.text_encoder_name_1:
-            text_encoder_1, loading_info = MT5EncoderModel.from_pretrained(
-                args.text_encoder_name_1, 
-                cache_dir=args.cache_dir, 
-                output_loading_info=True,
-                mindspore_dtype=text_encoder_dtype,
-                use_safetensors=True
-                )      
-            # loading_info.pop("unexpected_keys")  # decoder weights are ignored
-            # logger.info(f"Loaded MT5 Encoder: {loading_info}")
-            text_encoder_1 = text_encoder_1.set_train(False)  
-        else:
-            text_encoder_1 = T5EncoderModel.from_pretrained(
-                args.text_encoder_name_1, cache_dir=args.cache_dir, 
-                mindspore_dtype=text_encoder_dtype
-                ).set_train(False)
-    tokenizer_1 = AutoTokenizer.from_pretrained(
-        args.text_encoder_name_1, cache_dir=args.cache_dir
-        )
-
-    if args.text_encoder_name_2 is not None:
-        text_encoder_2, loading_info = CLIPTextModelWithProjection.from_pretrained(
-            args.text_encoder_name_2, 
-            cache_dir=args.cache_dir, 
-            mindspore_dtype=text_encoder_dtype,
-            output_loading_info=True,
-            use_safetensors=True,
-            )
-        # loading_info.pop("unexpected_keys")  # only load text model, ignore vision model
-        # loading_info.pop("mising_keys") # Note: missed keys when loading open-clip models
-        # logger.info(f"Loaded CLIP Encoder: {loading_info}") 
-        text_encoder_2 = text_encoder_2.set_train(False)
-        tokenizer_2 = AutoTokenizer.from_pretrained(
-            args.text_encoder_name_2, cache_dir=args.cache_dir
-            )
-    else:
-        text_encoder_2, tokenizer_2 = None, None
-
-    # Build transformer
-    print_banner("transformer model init")
-    FA_dtype = get_precision(args.precision) if get_precision(args.precision) != ms.float32 else ms.bfloat16
-    assert args.model_type == "dit", "Currently only suppport model_type as 'dit'@"
-    if args.ms_checkpoint is not None and os.path.exists(args.ms_checkpoint):
-        logger.info(f"Initiate from MindSpore checkpoint file {args.ms_checkpoint}")
-        state_dict = ms.load_checkpoint(args.ms_checkpoint)
-        # rm 'network.' prefix
-        state_dict = dict(
-            [k.replace("network.", "") if k.startswith("network.") else k, v] for k, v in state_dict.items()
-        )
-    else:
-        state_dict = None
-    model_version = args.model_path.split("/")[-1]
-    if (args.version != 'v1_3') and (model_version.split("x")[0][:3] != "any"):
-        if int(model_version.split("x")[0]) != args.num_frames:
-            logger.warning(
-                f"Detect that the loaded model version is {model_version}, but found a mismatched number of frames {model_version.split('x')[0]}"
-            )
-        if int(model_version.split("x")[1][:-1]) != args.height:
-            logger.warning(
-                f"Detect that the loaded model version is {model_version}, but found a mismatched resolution {args.height}x{args.width}"
-            )
-    elif (args.version == 'v1_3') and (model_version.split("x")[0] == "any93x640x640"): # TODO: currently only release one model
-        if (args.height % 32 != 0) or (args.width % 32 != 0):
-            logger.warning(
-                f"Detect that the loaded model version is {model_version}, but found a mismatched resolution {args.height}x{args.width}. The resolution of the inference should be a multiple of 32."
-            )
-        if (args.num_frames - 1) % 4 != 0:
-            logger.warning(
-                    f"Detect that the loaded model version is {model_version}, but found a mismatched number of frames {args.num_frames}. Frames needs to be 4n+1, e.g. 93, 77, 61, 45, 29, 1 (image)"
-                )
-    # dit_dtype = get_precision(args.precision) 
-    # if dit_dtype == "fp16": # Attention processor cannot convert to fp16
-    dit_dtype = None
-    if args.version == 'v1_3':
-        # TODO
-        # if args.model_type == 'inpaint' or args.model_type == 'i2v':
-        #     transformer_model = OpenSoraInpaint_v1_3.from_pretrained(
-        #         args.model_path, cache_dir=args.cache_dir,
-        #         device_map=None, mindspore_dtype=weight_dtype
-        #         ).set_train(False)
-        # else:
-        
-        transformer_model, logging_info = OpenSoraT2V_v1_3.from_pretrained(
-            args.model_path, 
-            state_dict=state_dict,
-            cache_dir=args.cache_dir,
-            # mindspore_dtype=dit_dtype,
-            FA_dtype = FA_dtype,
-            output_loading_info=True, 
-            )
-        logger.info(logging_info)
-    elif args.version == 'v1_5':
-        if args.model_type == 'inpaint' or args.model_type == 'i2v':
-            raise NotImplementedError('Inpainting model is not available in v1_5')
-        else:
-            from opensora.models.diffusion.opensora_v1_5.modeling_opensora import OpenSoraT2V_v1_5
-            transformer_model = OpenSoraT2V_v1_5.from_pretrained(
-                args.model_path, cache_dir=args.cache_dir, 
-                # device_map=None, 
-                mindspore_dtype=weight_dtype
-                )
-    
-    # Mixed precision
-    dtype = get_precision(args.precision)
-    if args.precision in ["fp16", "bf16"]:
-        if not args.global_bf16:
-            amp_level = args.amp_level
-            if dtype == ms.float16:
-                custom_fp32_cells=[LayerNorm, Attention, nn.SiLU, nn.GELU, PixArtAlphaCombinedTimestepSizeEmbeddings]
-            else:
-                custom_fp32_cells= [
-                    nn.MaxPool2d,
-                    nn.MaxPool3d, # do not support bf16
-                    LayerNorm,
-                    nn.SiLU,
-                    nn.GELU,
-                    PixArtAlphaCombinedTimestepSizeEmbeddings,
-                ]
-            transformer_model = auto_mixed_precision(
-                transformer_model,
-                amp_level=args.amp_level,
-                dtype=dtype,
-                custom_fp32_cells=custom_fp32_cells
-                # [LayerNorm, Attention, nn.SiLU, nn.GELU, PixArtAlphaCombinedTimestepSizeEmbeddings]
-                # if dtype == ms.float16
-                # else [
-                #     nn.MaxPool2d,
-                #     nn.MaxPool3d,
-                #     LayerNorm,
-                #     nn.SiLU,
-                #     nn.GELU,
-                #     PixArtAlphaCombinedTimestepSizeEmbeddings,
-                # ],
-            )
-            logger.info(
-                f"Set mixed precision to {args.amp_level} with dtype={args.precision}, custom fp32_cells {custom_fp32_cells}"
-            )
-        else:
-            logger.info(f"Using global bf16. Force model dtype from {dtype} to ms.bfloat16")
-            dtype = ms.bfloat16
-    elif args.precision == "fp32":
-        amp_level = "O0"
-    else:
-        raise ValueError(f"Unsupported precision {args.precision}")
-    transformer_model = transformer_model.set_train(False)
-    for param in transformer_model.get_parameters():  # freeze transformer_model
-        param.requires_grad = False
-
-    # Build scheduler
-    scheduler = get_scheduler(args)
-    
-    # Build inference pipeline
-    # pipeline_class = OpenSoraInpaintPipeline if args.model_type == 'inpaint' or args.model_type == 'i2v' else OpenSoraPipeline
-    pipeline_class = OpenSoraPipeline
-
-    pipeline = pipeline_class(
-        vae=vae,
-        text_encoder=text_encoder_1,
-        tokenizer=tokenizer_1,
-        scheduler=scheduler,
-        transformer=transformer_model, 
-        text_encoder_2=text_encoder_2,
-        tokenizer_2=tokenizer_2,
-    )
-
-    # Print key info
-    num_params_vae, num_params_vae_trainable = count_params(vae)
-    num_params_latte, num_params_latte_trainable = count_params(transformer_model)
-    num_params = num_params_vae + num_params_latte
-    num_params_trainable = num_params_vae_trainable + num_params_latte_trainable
-    key_info = "Key Settings:\n" + "=" * 50 + "\n"
-    key_info += "\n".join(
-        [
-            f"MindSpore mode[GRAPH(0)/PYNATIVE(1)]: {args.mode}",
-            f"Jit level: {args.jit_level}",
-            f"Num of samples: {len(args.text_prompt)}",
-            f"Num params: {num_params:,} (latte: {num_params_latte:,}, vae: {num_params_vae:,})",
-            f"Num trainable params: {num_params_trainable:,}",
-            f"Transformer dtype: {dtype}",
-            f"VAE dtype: {vae_dtype}",
-            f"Text encoder dtype: {text_encoder_dtype}",
-            f"Sampling steps {args.num_sampling_steps}",
-            f"Sampling method: {args.sample_method}",
-            f"CFG guidance scale: {args.guidance_scale}",
-            f"FA dtype: {FA_dtype}",
-            f"Inference shape (num_frames x height x width): {args.num_frames}x{args.height}x{args.width}",
-        ]
-    )
-    key_info += "\n" + "=" * 50
-    logger.info(key_info)
-
-    return pipeline
-
-def run_model_and_save_samples(args, pipeline, rank_id, device_num, caption_refiner_model=None, enhance_video_model=None):
-    if args.seed is not None:
-        set_seed(args.seed, rank=rank_id)
-
-    # Handle input text prompts
-    print_banner("text prompts loading")
-    ext = (
-        f"{args.video_extension}" if not (args.save_latents or args.decode_latents) else "npy"
-    )  # save video as gif or save denoised latents as npy files.
-    ext = "jpg" if args.num_frames == 1 else ext
-    if not isinstance(args.text_prompt, list):
-        args.text_prompt = [args.text_prompt]
-    # if input is a text file, where each line is a caption, load it into a list
-    if len(args.text_prompt) == 1 and args.text_prompt[0].endswith("txt"):
-        captions = open(args.text_prompt[0], "r").readlines()
-        args.text_prompt = [i.strip() for i in captions]
-    if len(args.text_prompt) == 1 and args.text_prompt[0].endswith("csv"):
-        captions = pd.read_csv(args.text_prompt[0])
-        args.text_prompt = [i.strip() for i in captions["cap"]]
-    n = len(args.text_prompt)
-    assert n > 0, "No captions provided"
-    logger.info(f"Number of prompts: {n}")
-    logger.info(f"Number of generated samples for each prompt {args.num_videos_per_prompt}")
-
-    # Create dataloader for the captions
-    csv_file = {"path": [], "cap": []}
-    for i in range(n):
-        for i_video in range(args.num_videos_per_prompt):
-            csv_file["path"].append(f"{i_video}-{args.text_prompt[i].strip()[:100]}.{ext}")
-            csv_file["cap"].append(args.text_prompt[i])
-    temp_dataset_csv = os.path.join(save_dir, "dataset.csv")
-    pd.DataFrame.from_dict(csv_file).to_csv(temp_dataset_csv, index=False, columns=csv_file.keys())
-
-    ds_config = dict(
-        data_file_path=temp_dataset_csv,
-        tokenizer=None,  # tokenizer,
-        file_column="path",
-        caption_column="cap",
-    )
-    dataset = create_dataloader(
-        ds_config,
-        args.batch_size,
-        ds_name="text",
-        num_parallel_workers=12,
-        max_rowsize=32,
-        shuffle=False,  # be in order
-        device_num=device_num if not get_sequence_parallel_state() else (device_num // hccl_info.world_size),
-        rank_id=rank_id if not get_sequence_parallel_state() else hccl_info.group_id,
-        drop_remainder=False,
-    )
-    dataset_size = dataset.get_dataset_size()
-    logger.info(f"Num batches: {dataset_size}")
-    ds_iter = dataset.create_dict_iterator(1, output_numpy=True)
-
-    # Decode latents directly
-    if args.decode_latents:
-        print("Directly decoding latents...")
-        assert isinstance(pipeline, ae_wrapper[args.ae])
-        vae = pipeline
-        for step, data in tqdm(enumerate(ds_iter), total=dataset_size):
-            file_paths = data["file_path"]
-            loaded_latents = []
-            for i_sample in range(args.batch_size):
-                save_fp = os.path.join(save_dir, file_paths[i_sample])
-                assert os.path.exists(
-                    save_fp
-                ), f"{save_fp} does not exist! Please check the npy files under {save_dir} or check if you run `--save_latents` ahead."
-                loaded_latents.append(np.load(save_fp))
-            loaded_latents = (
-                np.stack(loaded_latents) if loaded_latents[0].ndim == 4 else np.concatenate(loaded_latents, axis=0)
-            )
-            decode_data = (
-                vae.decode(ms.Tensor(loaded_latents)).permute(0, 1, 3, 4, 2).to(ms.float32)
-            )  # (b t c h w) -> (b t h w c)
-            decode_data = ms.ops.clip_by_value(
-                (decode_data + 1.0) / 2.0, clip_value_min=0.0, clip_value_max=1.0
-            ).asnumpy()
-            for i_sample in range(args.batch_size):
-                save_fp = os.path.join(save_dir, file_paths[i_sample]).replace(".npy", f".{args.video_extension}")
-                save_video_data = decode_data[i_sample : i_sample + 1]
-                save_videos(save_video_data, save_fp, loop=0, fps=args.fps)  # (b t h w c)
-        
-        # Delete files that are no longer needed
-        if os.path.exists(temp_dataset_csv):
-            os.remove(temp_dataset_csv)
-
-        if args.decode_latents:
-            npy_files = glob.glob(os.path.join(save_dir, "*.npy"))
-            for fp in npy_files:
-                os.remove(fp)
-    
-    # TODO
-    # if args.model_type == 'inpaint' or args.model_type == 'i2v':
-    #     if not isinstance(args.conditional_pixel_values_path, list):
-    #         args.conditional_pixel_values_path = [args.conditional_pixel_values_path]
-    #     if len(args.conditional_pixel_values_path) == 1 and args.conditional_pixel_values_path[0].endswith('txt'):
-    #         temp = open(args.conditional_pixel_values_path[0], 'r').readlines()
-    #         conditional_pixel_values_path = [i.strip().split(',') for i in temp]
-    #     mask_type = args.mask_type if args.mask_type is not None else None
-
-    positive_prompt = """
-    high quality, high aesthetic, {}
-    """
-    negative_prompt = """
-    nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, 
-    low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry.
-    """
-    # positive_prompt = (
-    #     "(masterpiece), (best quality), (ultra-detailed), {}. emotional, "
-    #     + "harmonious, vignette, 4k epic detailed, shot on kodak, 35mm photo, sharp focus, high budget, cinemascope, moody, epic, gorgeous"
-    # )
-    # negative_prompt = (
-    #     "nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, "
-    #     + "extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry"
-    # )
-
-    def generate(step, data, ext, conditional_pixel_values_path=None, mask_type=None):
-        
-         
-        if args.caption_refiner is not None:
-            if args.model_type != 'inpaint' and args.model_type != 'i2v':
-                refine_prompt = caption_refiner_model.get_refiner_output(prompt)
-                print(f'\nOrigin prompt: {prompt}\n->\nRefine prompt: {refine_prompt}')
-                prompt = refine_prompt
-            else:
-                # Due to the current use of LLM as the caption refiner, additional content that is not present in the control image will be added. Therefore, caption refiner is not used in this mode.
-                print('Caption refiner is not available for inpainting model, use the original prompt...')
-                time.sleep(3)
-        # TODO 
-        # input_prompt = positive_prompt.format(prompt)
-        # if args.model_type == 'inpaint' or args.model_type == 'i2v':
-        #     print(f'\nConditional pixel values path: {conditional_pixel_values_path}')
-        #     videos = pipeline(
-        #         conditional_pixel_values_path=conditional_pixel_values_path,
-        #         mask_type=mask_type,
-        #         crop_for_hw=args.crop_for_hw,
-        #         max_hxw=args.max_hxw,
-        #         prompt=input_prompt, 
-        #         negative_prompt=negative_prompt, 
-        #         num_frames=args.num_frames,
-        #         height=args.height,
-        #         width=args.width,
-        #         num_inference_steps=args.num_sampling_steps,
-        #         guidance_scale=args.guidance_scale,
-        #         num_samples_per_prompt=args.num_samples_per_prompt,
-        #         max_sequence_length=args.max_sequence_length,
-        #     ).videos
-        # else:
-        prompt = [x for x in data["caption"]]
-        print(f"read prompt data: {prompt}") 
-        file_paths = data["file_path"]
-        input_prompt = positive_prompt.format(prompt[0]) # remove "[]"
-        saved_prompt1_dict = None
-        # TODO debug use delete later
-        if args.saved_prompt1_dir is not None and os.path.isfile(args.saved_prompt1_dir) and (args.saved_prompt1_dir).endswith(".npz"):
-            saved_prompt1_dict = []
-            np_files = np.load(args.saved_prompt1_dir)
-            for key in np_files:
-                saved_prompt1_dict.append(ms.Tensor(np_files[key]))
-        videos = (
-            pipeline(
-                input_prompt, 
-                negative_prompt=negative_prompt, 
-                num_frames=args.num_frames,
-                height=args.height,
-                width=args.width,
-                num_inference_steps=args.num_sampling_steps,
-                guidance_scale=args.guidance_scale,
-                num_samples_per_prompt=args.num_samples_per_prompt,
-                output_type="latents" if args.save_latents else "pil",
-                max_sequence_length=args.max_sequence_length,
-                saved_prompt1_dict=saved_prompt1_dict,
-                saved_prompt1_dir=args.saved_prompt1_dir
-            )
-            .videos.to(ms.float32)
-            .asnumpy()
-        )
-        # if enhance_video_model is not None:
-        #     # b t h w c
-        #     videos = enhance_video_model.enhance_a_video(videos, input_prompt, 2.0, args.fps, 250)
-        if step == 0 and profiler is not None:
-            profiler.stop()
-
-        if get_sequence_parallel_state() and hccl_info.rank % hccl_info.world_size != 0:
-            pass
-        else:
-            # save result
-            for i_sample in range(args.batch_size):
-                file_path = os.path.join(save_dir, file_paths[i_sample])
-                assert ext in file_path, f"Only support saving as {ext} files, but got {file_path}."
-                if args.save_latents:
-                    np.save(file_path, videos[i_sample : i_sample + 1])
-                else:
-                    if args.num_frames == 1:
-                        ext = "jpg"
-                        image = videos[i_sample, 0]  # (b t h w c)  -> (h, w, c)
-                        image = (image * 255).round().clip(0, 255).astype(np.uint8)
-                        Image.fromarray(image).save(file_path)
-                    else:
-                        save_video_data = videos[i_sample : i_sample + 1]  # (b t h w c)
-                        save_videos(save_video_data, file_path, loop=0, fps=args.fps)
-
-    if args.profile:
-        profiler = ms.Profiler(output_path="./mem_info", profile_memory=True)
-        ms.set_context(memory_optimize_level="O0")
-        ms.set_context(pynative_synchronize=True)
-    else:
-        profiler = None
-
-    # Infer
-    # if args.model_type == 'inpaint' or args.model_type == 'i2v':
-    #     for index, (prompt, cond_path) in enumerate(zip(args.text_prompt, conditional_pixel_values_path)):
-    #         if not args.sp and args.local_rank != -1 and index % args.world_size != args.local_rank:
-    #             continue
-    #         generate(prompt, conditional_pixel_values_path=cond_path, mask_type=mask_type)
-    #     print('completed, please check the saved images and videos')
-    # else:
-    for step, data in tqdm(enumerate(ds_iter), total=dataset_size):
-        generate(step, data, ext)
-        break
-    
-    
-    # Delete files that are no longer needed
-    if os.path.exists(temp_dataset_csv):
-        os.remove(temp_dataset_csv)
-
-
-
-if __name__ == "__main__":
-    args = parse_args()
-    save_dir = args.save_img_path
-    os.makedirs(save_dir, exist_ok=True)
-    set_logger(name="", output_dir=save_dir)
-    
-    # 1. init environment
-    rank_id, device_num = npu_config.set_npu_env(args)
-    # rank_id, device_num = init_env(
-    #     args.mode,
-    #     seed=args.seed,
-    #     distributed=args.use_parallel,
-    #     device_target=args.device,
-    #     max_device_memory=args.max_device_memory,
-    #     parallel_mode=args.parallel_mode,
-    #     precision_mode=args.precision_mode,
-    #     global_bf16=args.global_bf16,
-    #     sp_size=args.sp_size,
-    #     jit_level=args.jit_level,
-    #     jit_syntax_level=args.jit_syntax_level,
-    # )
-    
-    if args.caption_refiner is not None:
-        caption_refiner_model = OpenSoraCaptionRefiner(args.caption_refiner, dtype=ms.float16)
-    else:
-        caption_refiner_model = None
-        
-    # 2. build models and pipeline
-    if args.num_frames != 1 and args.enhance_video is not None:
-        from opensora.sample.VEnhancer.enhance_a_video import VEnhancer
-        enhance_video_model = VEnhancer(model_path=args.enhance_video, version='v2', device=args.device)
-    else:
-        enhance_video_model = None
-    pipeline = prepare_pipeline(args)
-    
-
-    # if args.caption_refiner is not None:
-    #     caption_refiner_model = OpenSoraCaptionRefiner(args.caption_refiner, dtype=ms.float16)
-    # else:
-    #     caption_refiner_model = None
-
-    # 3. inference
-    start_time = time.time()
-    run_model_and_save_samples(args, pipeline, rank_id, device_num, save_dir, caption_refiner_model, enhance_video_model)
-    end_time = time.time()
-    time_cost = end_time - start_time
-    logger.info(f"Inference time cost: {time_cost:0.3f}s")
-    logger.info(f"Inference speed: {len(args.text_prompt) / time_cost:0.3f} samples/s")
-    logger.info(f"{'latents' if args.save_latents else 'videos' } saved to {save_dir}")
-   
