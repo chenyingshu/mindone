@@ -1701,7 +1701,7 @@ class GenerationMixin:
         """
         # 1. Handle `generation_config` and kwargs that might update it, and validate the `.generate()` call
         if kwargs is not None: # Convert to ms.Tensor
-            for key, value in kwargs.items(): # by default input numpy array
+            for key, value in kwargs.items(): # by default input numpy array or list
                 if isinstance(value, np.ndarray):
                     kwargs[key] = ms.Tensor(value)
                 elif isinstance(value, list):

@@ -256,8 +256,8 @@ def apply_rotary_pos_emb_vision(tensor: ms.Tensor, freqs: ms.Tensor) -> ms.Tenso
     tensor = tensor.float()
     cos = freqs.cos()
     sin = freqs.sin()
-    cos = cos.unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
-    sin = sin.unsqueeze(1).repeat(1, 1, 2).unsqueeze(0).float()
+    cos = cos.unsqueeze(1).tile((1, 1, 2)).unsqueeze(0).float()
+    sin = sin.unsqueeze(1).tile((1, 1, 2)).unsqueeze(0).float()
     output = (tensor * cos) + (rotate_half(tensor) * sin)
     output = output.to(orig_dtype)
     return output
@@ -291,14 +291,15 @@ class PatchEmbed(nn.Cell):
         self.embed_dim = embed_dim
 
         kernel_size = (temporal_patch_size, patch_size, patch_size) # For 'Conv3d', the type of 'kernel_size' should be one of '['int', 'tuple']'
-        self.proj = nn.Conv3d(in_channels, embed_dim, kernel_size=kernel_size, stride=kernel_size, has_bias=False, weight_init=Normal(sigma=init_std))
+        self.proj = nn.Conv3d(in_channels, embed_dim, kernel_size=kernel_size, stride=kernel_size, has_bias=False, weight_init=Normal(sigma=init_std)).to_float(ms.bfloat16)
+        # nn.Conv3d does not support float32
 
     def construct(self, hidden_states: ms.Tensor) -> ms.Tensor:
         target_dtype = self.proj.weight.dtype
         hidden_states = hidden_states.view(
-            -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
+            (-1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size)
         )
-        hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).view(-1, self.embed_dim)
+        hidden_states = self.proj(hidden_states).view((-1, self.embed_dim)).to(dtype=target_dtype)
         return hidden_states
 
 
@@ -314,7 +315,7 @@ class PatchMerger(nn.Cell):
         )
 
     def construct(self, x: ms.Tensor) -> ms.Tensor:
-        x = self.mlp(self.ln_q(x).view(-1, self.hidden_size))
+        x = self.mlp(self.ln_q(x).view((-1, self.hidden_size)))
         return x
 
 
@@ -637,9 +638,9 @@ class Qwen2VLAttention(nn.Cell):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).swapaxes(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).swapaxes(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).swapaxes(1, 2)
+        query_states = query_states.view((bsz, q_len, self.num_heads, self.head_dim)).swapaxes(1, 2)
+        key_states = key_states.view((bsz, q_len, self.num_key_value_heads, self.head_dim)).swapaxes(1, 2)
+        value_states = value_states.view((bsz, q_len, self.num_key_value_heads, self.head_dim)).swapaxes(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
@@ -679,7 +680,7 @@ class Qwen2VLAttention(nn.Cell):
             attn_weights = ops.where(ops.isinf(attn_weights), ops.zeros_like(attn_weights), attn_weights)
 
         # upcast attention to fp32
-        attn_weights = ops.softmax(attn_weights, axis=-1).to(query_states.dtype)
+        attn_weights = ops.softmax(attn_weights.to(ms.float32), axis=-1).to(query_states.dtype)
         attn_weights = ops.dropout(attn_weights, p=self.attention_dropout, training=self.training)
         attn_output = ops.matmul(attn_weights, value_states)
 
@@ -734,9 +735,9 @@ class Qwen2VLFlashAttention2(Qwen2VLAttention):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).swapaxes(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).swapaxes(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).swapaxes(1, 2)
+        query_states = query_states.view((bsz, q_len, self.num_heads, self.head_dim)).swapaxes(1, 2)
+        key_states = key_states.view((bsz, q_len, self.num_key_value_heads, self.head_dim)).swapaxes(1, 2)
+        value_states = value_states.view((bsz, q_len, self.num_key_value_heads, self.head_dim)).swapaxes(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
@@ -898,9 +899,9 @@ class Qwen2VLSdpaAttention(Qwen2VLAttention):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).swapaxes(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).swapaxes(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).swapaxes(1, 2)
+        query_states = query_states.view((bsz, q_len, self.num_heads, self.head_dim)).swapaxes(1, 2)
+        key_states = key_states.view((bsz, q_len, self.num_key_value_heads, self.head_dim)).swapaxes(1, 2)
+        value_states = value_states.view((bsz, q_len, self.num_key_value_heads, self.head_dim)).swapaxes(1, 2)
 
         kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
@@ -960,7 +961,7 @@ class Qwen2VLSdpaAttention(Qwen2VLAttention):
         )
 
         attn_output = attn_output.swapaxes(1, 2).contiguous()
-        attn_output = attn_output.view(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.view((bsz, q_len, self.hidden_size))
 
         attn_output = self.o_proj(attn_output)
 
@@ -1125,9 +1126,11 @@ class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel): # MSPreTrai
         return self.blocks[0].mlp.fc2.weight.dtype
 
     def rot_pos_emb(self, grid_thw):
-        print("enter rot_pos_emb(grid_thw=)", grid_thw)
         pos_ids = []
         for t, h, w in grid_thw:
+            t = t.item()
+            h = h.item()
+            w = w.item()
             hpos_ids = ops.arange(h).unsqueeze(1).broadcast_to((-1, w))
             hpos_ids = hpos_ids.reshape(
                 h // self.spatial_merge_size,
@@ -1136,7 +1139,7 @@ class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel): # MSPreTrai
                 self.spatial_merge_size,
             )
             hpos_ids = hpos_ids.permute(0, 2, 1, 3)
-            hpos_ids = hpos_ids.flatten()
+            hpos_ids = hpos_ids.flatten(start_dim=0)
 
             wpos_ids = ops.arange(w).unsqueeze(0).broadcast_to((h, -1))
             wpos_ids = wpos_ids.reshape(
@@ -1146,19 +1149,19 @@ class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel): # MSPreTrai
                 self.spatial_merge_size,
             )
             wpos_ids = wpos_ids.permute(0, 2, 1, 3)
-            wpos_ids = wpos_ids.flatten()
-            pos_ids.append(ops.stack([hpos_ids, wpos_ids], axis=-1).repeat(t, 1))
+            wpos_ids = wpos_ids.flatten(start_dim=0)
+            pos_ids.append(ops.stack([hpos_ids, wpos_ids], axis=-1).tile((t, 1)))
         pos_ids = ops.cat(pos_ids, axis=0)
         max_grid_size = grid_thw[:, 1:].max()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
-        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
+        rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(start_dim=1)
         return rotary_pos_emb
 
     def construct(self, hidden_states: ms.Tensor, grid_thw: ms.Tensor) -> ms.Tensor:
         hidden_states = self.patch_embed(hidden_states)
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        cu_seqlens = ops.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+        cu_seqlens = ops.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).int().cumsum(
             axis=0, dtype=ms.int32
         )
         cu_seqlens = ops.pad(cu_seqlens, (1, 0), value=None)
@@ -1602,9 +1605,9 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
                     st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                     llm_pos_ids_list.append(ops.arange(text_len).view(1, -1).broadcast_to((3, -1)) + st_idx)
 
-                    t_index = ops.arange(llm_grid_t).view((-1, 1)).broadcast_to((-1, llm_grid_h * llm_grid_w)).flatten()
-                    h_index = ops.arange(llm_grid_h).view((1, -1, 1)).broadcast_to((llm_grid_t, -1, llm_grid_w)).flatten()
-                    w_index = ops.arange(llm_grid_w).view((1, 1, -1)).broadcast_to((llm_grid_t, llm_grid_h, -1)).flatten()
+                    t_index = ops.arange(llm_grid_t).view((-1, 1)).broadcast_to((-1, llm_grid_h * llm_grid_w)).flatten(start_dim=0)
+                    h_index = ops.arange(llm_grid_h).view((1, -1, 1)).broadcast_to((llm_grid_t, -1, llm_grid_w)).flatten(start_dim=0)
+                    w_index = ops.arange(llm_grid_w).view((1, 1, -1)).broadcast_to((llm_grid_t, llm_grid_h, -1)).flatten(start_dim=0)
                     llm_pos_ids_list.append(ops.stack([t_index, h_index, w_index]) + text_len + st_idx)
                     st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
