@@ -32,8 +32,8 @@ from opensora.utils.utils import _check_cfgs_in_parser, get_precision
 from opensora.models.causalvideovae import ae_stride_config, ae_wrapper
 # from opensora.sample.caption_refiner import OpenSoraCaptionRefiner
 from opensora.models.causalvideovae.model.modules.updownsample import TrilinearInterpolate
-from examples.opensora_pku.opensora.models.diffusion.opensora.modeling_opensora import LayerNorm, OpenSoraT2V_v1_3
-from examples.opensora_pku.opensora.models.diffusion.opensora.modules import Attention, BasicTransformerBlock
+from examples.opensora_pku.opensora.models.diffusion.opensora.modeling_opensora import OpenSoraT2V_v1_3
+from examples.opensora_pku.opensora.models.diffusion.opensora.modules import Attention, LayerNorm
 from opensora.sample.pipeline_opensora import OpenSoraPipeline
 from opensora.models.diffusion.common import PatchEmbed2D
 
@@ -583,7 +583,6 @@ def run_model_and_save_samples(args, pipeline, rank_id, device_num, save_dir, ca
     # else:
     for step, data in tqdm(enumerate(ds_iter), total=dataset_size):
         generate(step, data, ext)
-        break
     
     
     # Delete files that are no longer needed

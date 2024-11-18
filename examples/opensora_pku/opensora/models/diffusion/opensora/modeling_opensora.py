@@ -21,19 +21,7 @@ from opensora.models.diffusion.opensora.modules import BasicTransformerBlock, La
 from opensora.models.diffusion.common import PatchEmbed2D
 from opensora.npu_config import npu_config
 
-import numpy as np
-
-#TODO: debug use, delete later
-def print_diff(torch_numpy, ms_numpy, name):
-    x = torch_numpy
-    y = ms_numpy
-    abs_diff = np.abs(x-y).mean()
-
-    rel_diff1 = (np.abs(x-y)/(np.abs(x)+1e-8)).mean()
-    rel_diff2 = (np.abs(x-y)/(np.abs(x)+np.abs(x).mean())).mean()
-
-    print(f"{name}: abs diff {abs_diff:.5f}, relative diff 1 {rel_diff1:.5f} relative diff 2 {rel_diff2:.5f}")
-
+logger = logging.getLogger(__name__)
 
 class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
     _supports_gradient_checkpointing = True
@@ -79,6 +67,19 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
         self.use_recompute = use_recompute #NEW
         self.FA_dtype = FA_dtype #NEW
         self._init_patched_inputs()
+
+        if self.use_recompute:
+            num_no_recompute = self.config.num_no_recompute
+            num_blocks = len(self.transformer_blocks)
+            assert num_no_recompute >= 0, "Expect to have num_no_recompute as a positive integer."
+            assert (
+                num_no_recompute <= num_blocks
+            ), "Expect to have num_no_recompute as an integer no greater than the number of blocks,"
+            f"but got {num_no_recompute} and {num_blocks}."
+            logger.info(f"Excluding {num_no_recompute} blocks from the recomputation list.")
+            for bidx, block in enumerate(self.transformer_blocks):
+                if bidx < num_blocks - num_no_recompute:
+                    self.recompute(block)
 
     def _init_patched_inputs(self):
 
@@ -133,6 +134,14 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
             stride=(self.config.patch_size_t, self.config.patch_size, self.config.patch_size),
             pad_mode="pad"
         )
+
+    def recompute(self, b):
+        if not b._has_config_recompute:
+            b.recompute(parallel_optimizer_comm_recompute=True)
+        if isinstance(b, nn.CellList):
+            self.recompute(b[-1])
+        elif ms.get_context("mode") == ms.GRAPH_MODE:
+            b.add_flags(output_no_recompute=True)
 
     # rewrite class method to allow the state dict as input
     @classmethod
@@ -262,6 +271,65 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
 
         return model
 
+
+    @classmethod
+    def load_from_checkpoint(cls, model, ckpt_path):
+        if os.path.isdir(ckpt_path) or ckpt_path.endswith(".safetensors"):
+            return cls.load_from_safetensors(model, ckpt_path)
+        elif ckpt_path.endswith(".ckpt"):
+            return cls.load_from_ms_checkpoint(ckpt_path)
+        else:
+            raise ValueError("Only support safetensors pretrained ckpt or MindSpore pretrained ckpt!")
+
+    @classmethod
+    def load_from_safetensors(cls, model, ckpt_path):
+        if os.path.isdir(ckpt_path):
+            ckpts = glob.glob(os.path.join(ckpt_path, "*.safetensors"))
+            n_ckpt = len(ckpts)
+            assert (
+                n_ckpt == 1
+            ), f"Expect to find only one safetenesors file under {ckpt_path}, but found {n_ckpt} .safetensors files."
+            model_file = ckpts[0]
+            pretrained_model_name_or_path = ckpt_path
+        elif ckpt_path.endswith(".safetensors"):
+            model_file = ckpt_path
+            pretrained_model_name_or_path = os.path.dirname(ckpt_path)
+        state_dict = load_state_dict(model_file, variant=None)
+        model._convert_deprecated_attention_blocks(state_dict)
+
+        model, missing_keys, unexpected_keys, mismatched_keys, error_msgs = cls._load_pretrained_model(
+            model,
+            state_dict,
+            model_file,
+            pretrained_model_name_or_path,
+            ignore_mismatched_sizes=False,
+        )
+        loading_info = {
+            "missing_keys": missing_keys,
+            "unexpected_keys": unexpected_keys,
+            "mismatched_keys": mismatched_keys,
+            "error_msgs": error_msgs,
+        }
+        logger.info(loading_info)
+        return model
+
+    @classmethod
+    def load_from_ms_checkpoint(self, model, ckpt_path):
+        sd = ms.load_checkpoint(ckpt_path)
+        # filter 'network.' prefix
+        rm_prefix = ["network."]
+        all_pnames = list(sd.keys())
+        for pname in all_pnames:
+            for pre in rm_prefix:
+                if pname.startswith(pre):
+                    new_pname = pname.replace(pre, "")
+                    sd[new_pname] = sd.pop(pname)
+
+        m, u = ms.load_param_into_net(model, sd)
+        print("net param not load: ", m, len(m))
+        print("ckpt param not load: ", u, len(u))
+        return model
+
     def _set_gradient_checkpointing(self, module, value=False):
         if hasattr(module, "gradient_checkpointing"):
             module.gradient_checkpointing = value
@@ -282,7 +350,6 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
         return_dict: bool = True,
         **kwargs, 
     ):
-        
         batch_size, c, frame, h, w = hidden_states.shape
         # ensure attention_mask is a bias, and give it a singleton query_tokens dimension.
         #   we may have done this conversion already, e.g. if we came here via UNet2DConditionModel#forward.
@@ -299,7 +366,7 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
             #   (1 = keep,      0 = discard)
             # b, frame, h, w -> a video
             # b, 1, h, w -> only images
-            attention_mask = attention_mask.to(self.dtype) 
+            attention_mask = attention_mask.to(self.dtype)
 
             attention_mask = attention_mask.unsqueeze(1)  # b 1 t h w
             attention_mask = self.max_pool3d(attention_mask)
@@ -319,7 +386,7 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
         height, width = hidden_states.shape[-2] // self.config.patch_size, hidden_states.shape[-1] // self.config.patch_size
 
         hidden_states, encoder_hidden_states, timestep, embedded_timestep = self._operate_on_patched_inputs(
-            hidden_states, encoder_hidden_states, timestep, batch_size, frame, dtype=self.dtype
+            hidden_states, encoder_hidden_states, timestep, batch_size, frame
         )
 
         if get_sequence_parallel_state():
@@ -350,18 +417,31 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
             else:
                 attention_mask, encoder_attention_mask = sparse_mask[1][block.attn1.processor.sparse_group]
 
-            # if self.training and self.gradient_checkpointing: #TODO: training 
+            # if self.training and self.gradient_checkpointing:  #TODO: training
+            if self.use_recompute and ms.get_context("mode") == ms.PYNATIVE_MODE:
+                block_args = {
+                    "hidden_states": hidden_states,
+                    "attention_mask": attention_mask,
+                    "encoder_hidden_states": encoder_hidden_states,
+                    "encoder_attention_mask": encoder_attention_mask,
+                    "timestep": timestep,
+                    "frame": frame, 
+                    "height": height, 
+                    "width": width, 
+                }
+                hidden_states = ms.recompute(block, **block_args) #BSH
+            else:
+                hidden_states = block(
+                        hidden_states,
+                        attention_mask=attention_mask,
+                        encoder_hidden_states=encoder_hidden_states,
+                        encoder_attention_mask=encoder_attention_mask,
+                        timestep=timestep,
+                        frame=frame, 
+                        height=height, 
+                        width=width, 
+                    ) # BSH
 
-            hidden_states = block(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    encoder_hidden_states=encoder_hidden_states,
-                    encoder_attention_mask=encoder_attention_mask,
-                    timestep=timestep,
-                    frame=frame, 
-                    height=height, 
-                    width=width, 
-                ) # BSH
 
         if get_sequence_parallel_state():
             # To (b, t*h*w, h) or (b, t//sp*h*w, h)
@@ -378,13 +458,12 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
             width=width,
         )  # b c t h w
 
+
         return output
 
-
     def _operate_on_patched_inputs(self, hidden_states, encoder_hidden_states, timestep, batch_size, frame):
-        
         hidden_states = self.pos_embed(hidden_states.to(self.dtype)) # (b, t*h*w, d)
-
+    
         added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
         timestep, embedded_timestep = self.adaln_single(
             timestep, added_cond_kwargs, batch_size=batch_size, hidden_dtype=self.dtype
@@ -397,7 +476,6 @@ class OpenSoraT2V_v1_3(ModelMixin, ConfigMixin):
 
         return hidden_states, encoder_hidden_states, timestep, embedded_timestep
 
-    
     
     def _get_output_for_patched_inputs(
         self, hidden_states, timestep, embedded_timestep, num_frames, height, width
