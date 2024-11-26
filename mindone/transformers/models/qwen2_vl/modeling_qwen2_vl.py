@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import mindspore as ms
-from mindspore import nn, ops
+from mindspore import nn, ops, mint
 from mindspore.nn import CrossEntropyLoss, LayerNorm
 
 from ...activations import ACT2FN
@@ -182,12 +182,8 @@ class Qwen2VLRotaryEmbedding(nn.Cell):
         inv_freq_expanded = self.inv_freq[None, None, :, None].float().broadcast_to((3, position_ids.shape[1], -1, 1))
         position_ids_expanded = position_ids[:, :, None, :].float()  # shape (3, bs, 1, positions)
         # Force float32 (see https://github.com/huggingface/transformers/pull/29285)
-        # device_type = x.device.type
-        # device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
-        # with torch.autocast(device_type=device_type, enabled=False):
-        # TODO? disable autocast type
         freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).swapaxes(2, 3)
-        emb = ops.cat((freqs, freqs), axis=-1)
+        emb = mint.cat((freqs, freqs), dim=-1)
         cos = emb.cos()
         sin = emb.sin()
 
@@ -203,7 +199,7 @@ def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
-    return ops.cat((-x2, x1), axis=-1)
+    return mint.cat((-x2, x1), dim=-1)
 
 
 def apply_multimodal_rotary_pos_emb(q, k, cos, sin, mrope_section, unsqueeze_dim=1):
@@ -335,8 +331,6 @@ class VisionAttention(nn.Cell):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        # self.qkv = nn.Dense(dim, dim * 3, has_bias=True)
-        # self.proj = nn.Dense(dim, dim)  
         self.qkv = nn.Dense(dim, dim * 3, has_bias=True, weight_init=Normal(sigma=init_std), bias_init="zeros")
         self.proj = nn.Dense(dim, dim, weight_init=Normal(sigma=init_std), bias_init="zeros")
 
@@ -357,10 +351,10 @@ class VisionAttention(nn.Cell):
         q = q.swapaxes(0, 1)
         k = k.swapaxes(0, 1)
         v = v.swapaxes(0, 1)
-        attn_weights = ops.matmul(q, k.swapaxes(1, 2)) / math.sqrt(self.head_dim)
+        attn_weights = mint.matmul(q, k.swapaxes(1, 2)) / math.sqrt(self.head_dim)
         attn_weights = attn_weights + attention_mask
-        attn_weights = ops.softmax(attn_weights, axis=-1).to(q.dtype)
-        attn_output = ops.matmul(attn_weights, v)
+        attn_weights = mint.nn.functional.softmax(attn_weights, dim=-1).to(q.dtype)
+        attn_output = mint.matmul(attn_weights, v)
         attn_output = attn_output.swapaxes(0, 1)
         attn_output = attn_output.reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
@@ -373,17 +367,18 @@ class VisionFlashAttention2(nn.Cell):
         self.num_heads = num_heads
         self.qkv = nn.Dense(dim, dim * 3, has_bias=True, weight_init=Normal(sigma=init_std), bias_init="zeros")
         self.proj = nn.Dense(dim, dim, weight_init=Normal(sigma=init_std), bias_init="zeros")
+        self.flash_attn_varlen_func = MSFlashAttention() # TODO
 
     def construct(
         self, hidden_states: ms.Tensor, cu_seqlens: ms.Tensor, rotary_pos_emb: ms.Tensor = None
     ) -> ms.Tensor:
         seq_length = hidden_states.shape[0]
-        q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+        q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute((1, 0, 2, 3)).unbind(0)
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        attn_output = flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen).reshape(
+        attn_output = self.flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen).reshape(
             seq_length, -1
         )
         attn_output = self.proj(attn_output)
@@ -392,31 +387,36 @@ class VisionFlashAttention2(nn.Cell):
 # https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html#torch-nn-functional-scaled-dot-product-attention
 # https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/models/ctrl/modeling_ctrl.py#L58
 # NEW
-def scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False) -> ms.Tensor:
+def scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, dtype=ms.float16) -> ms.Tensor:
+    # force fp16 precision calculation
+    origin_dtype = q.dtype
+    dtype = origin_dtype if dtype is None else dtype
+    q, k, v = q.to(dtype), k.to(dtype), v.to(dtype)
+
     # calculate attention
     L, S = q.shape[-2], k.shape[-2]
-    scale_factor = 1 / np.sqrt(q.shape[-1]) 
-    attn_bias = ops.zeros(L, S, dtype=q.dtype)
+    scale_factor = 1 / (q.shape[-1]**0.5) 
+    attn_bias = ops.zeros((L, S), dtype=dtype)
     
     if is_causal:
         assert attn_mask is None
-        temp_mask = ops.ones(L, S, dtype=ms.bool).tril(diagonal=0)
-        attn_bias = attn_bias.masked_fill(temp_mask.logical_not(), float("-inf"))
+        temp_mask = ops.ones((L, S), dtype=dtype).tril(diagonal=0).to(ms.bool_) # tril does not support bool/fp32
+        attn_bias = attn_bias.masked_fill(temp_mask.logical_not(), -1e5) #float("-inf"))
         attn_bias.to(q.dtype)
     
     if attn_mask is not None: # Apply the attention mask
-        if attn_mask.dtype == ms.bool:
-            attn_bias = attn_bias.masked_fill(attn_mask.logical_not(), float("-inf"))
+        if attn_mask.dtype == ms.bool_:
+            attn_bias = attn_bias.masked_fill(attn_mask.logical_not(), -1e5) #float("-inf"))
         else:
             attn_bias += attn_mask
 
-    attn_weight = ops.matmul(q, k.permute(0, 1, 3, 2)) * scale_factor
+    attn_weight = mint.matmul(q, k.swapaxes(-2,-1)) * scale_factor
     attn_weight += attn_bias
-    attn_weight = ops.softmax(attn_weight, axis=-1)
+    attn_weight = mint.nn.functional.softmax(attn_weight, dim=-1)
     attn_weight = ops.dropout(attn_weight, dropout_p, training=True)
-    output = ops.matmul(attn_weight, v)
+    output = mint.matmul(attn_weight, v)
 
-    return output
+    return output.to(origin_dtype)
 
 class VisionSdpaAttention(nn.Cell):
     def __init__(self, dim: int, num_heads: int = 16, init_std: float = 0.02) -> None:
@@ -433,7 +433,7 @@ class VisionSdpaAttention(nn.Cell):
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
 
-        attention_mask = ops.zeros([1, seq_length, seq_length], dtype=ms.bool)
+        attention_mask = mint.zeros([1, seq_length, seq_length], dtype=ms.bool_)
         for i in range(1, len(cu_seqlens)):
             attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = True
         q = q.swapaxes(0, 1)
@@ -933,10 +933,10 @@ class Qwen2VLSdpaAttention(Qwen2VLAttention):
 
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
-        # if query_states.device.type == "cuda" and attention_mask is not None:
-        #     query_states = query_states.contiguous()
-        #     key_states = key_states.contiguous()
-        #     value_states = value_states.contiguous()
+        if attention_mask is not None:
+            query_states = query_states.contiguous()
+            key_states = key_states.contiguous()
+            value_states = value_states.contiguous()
 
         # We dispatch to SDPA's Flash Attention or Efficient kernels via this `is_causal` if statement instead of an inline conditional assignment
         # in SDPA to support both torch.compile's dynamic shapes and full graph options. An inline conditional prevents dynamic shapes from compiling.
@@ -969,7 +969,7 @@ class Qwen2VLSdpaAttention(Qwen2VLAttention):
 
 
 QWEN2_VL_ATTENTION_CLASSES = {
-    "eager": Qwen2VLAttention,
+    "eager": Qwen2VLAttention, # testing not yet aligned
     "flash_attention_2": Qwen2VLFlashAttention2,
     "sdpa": Qwen2VLSdpaAttention,
 }
@@ -1086,7 +1086,7 @@ class Qwen2VLPreTrainedModel(MSPreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["Qwen2VLDecoderLayer", "Qwen2VLVisionBlock"]
     _skip_keys_device_placement = "past_key_values"
-    _supports_flash_attn_2 = True
+    _supports_flash_attn_2 = False
     _supports_sdpa = True
     _supports_cache_class = True
     _supports_static_cache = True
@@ -1869,3 +1869,9 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
             }
         )
         return model_inputs
+
+
+if __name__ == "__main__":
+    ## Debug and testing use only
+
+    # Decode
