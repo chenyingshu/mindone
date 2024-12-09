@@ -5,6 +5,7 @@ import os
 import subprocess
 from contextlib import contextmanager
 
+import pandas as pd
 from opensora.utils.ms_utils import init_env
 
 import mindspore as ms
@@ -44,7 +45,8 @@ class NPUConfig:
         self.original_run_dtype = None
 
         self.replaced_type = ms.float32
-        self.conv_dtype = ms.float16
+        self.conv_dtype = ms.bfloat16  # FIXME: torch uses float16
+        self.norm_dtype = ms.bfloat16  # use bf16 for group_norm, layer_norm and batch_norm. Set to fp32 when training
         if self.enable_FA and self.enable_FP32:
             self.inf_float = -10000.0
         else:
@@ -63,13 +65,31 @@ class NPUConfig:
         self.FA_dtype = ms.bfloat16
         assert self.FA_dtype in [ms.float16, ms.bfloat16], f"Unsupported flash-attention dtype: {self.FA_dtype}"
 
-    def set_npu_env(self, args):
+    def print_ops_dtype_info(self):
+        # print data types for some key operators
+        headers = ["Conv3D dtype", "FA dtype", "Norm dtype", "Interpolate, AvgPool"]
+        values = [[str(self.conv_dtype), str(self.FA_dtype), str(self.norm_dtype), str(self.replaced_type)]]
+        df = pd.DataFrame(values, columns=headers)
+        print("VAE operators data types:")
+        print(df)
+
+    def set_npu_env(self, args, strategy_ckpt_save_file=""):
         rank_id, device_num = init_env(
             mode=args.mode,
-            device_target=args.device,
-            precision_mode=getattr(args, "precision_mode", None),
+            seed=getattr(args, "seed", 42),
+            distributed=getattr(args, "use_parallel", False),
+            device_target=getattr(args, "device", "Ascend"),
+            max_device_memory=getattr(args, "max_device_memory", None),
+            parallel_mode=getattr(args, "parallel_mode", "data"),
+            mempool_block_size=getattr(args, "mempool_block_size", "9GB"),
+            global_bf16=getattr(args, "global_bf16", False),
+            strategy_ckpt_save_file=strategy_ckpt_save_file,
+            optimizer_weight_shard_size=getattr(args, "optimizer_weight_shard_size", 8),
+            sp_size=getattr(args, "sp_size", 1),
             jit_level=getattr(args, "jit_level", None),
+            enable_parallel_fusion=getattr(args, "enable_parallel_fusion", False),
             jit_syntax_level=getattr(args, "jit_syntax_level", "strict"),
+            comm_fusion=getattr(args, "comm_fusion", False),
         )
         self.rank = rank_id
         self.bind_thread_to_cpu()
@@ -130,20 +150,20 @@ class NPUConfig:
         if self.on_npu:
             if out_dtype is None:
                 out_dtype = x.dtype
-            x = operator.to_float(tmp_dtype)(x.to(tmp_dtype))
+            x = operator(x.to(tmp_dtype))
             x = x.to(out_dtype)
             return x
         else:
             return operator(x)
 
     def run_group_norm(self, operator, x):
-        return self._run(operator, x, ms.float32)
+        return self._run(operator, x, self.norm_dtype)
 
     def run_layer_norm(self, operator, x):
-        return self._run(operator, x, ms.float32)
+        return self._run(operator, x, self.norm_dtype)
 
     def run_batch_norm(self, operator, x):
-        return self._run(operator, x, ms.float32)
+        return self._run(operator, x, self.norm_dtype)
 
     def run_conv3d(self, operator, x, out_dtype):
         return self._run(operator, x, self.conv_dtype, out_dtype)
@@ -158,24 +178,14 @@ class NPUConfig:
             x = operator(x, kernel_size=kernel_size, stride=stride)
         return x
 
-    def run_pad_2d(self, operator, x, pad, mode="constant"):
+    def run_interpolate(self, operator, x, size=None, scale_factor=None):
         if self.on_npu:
             x_dtype = x.dtype
             x = x.to(self.replaced_type)
-            x = operator(x, pad, mode)
+            x = operator(x, size=size, scale_factor=scale_factor)
             x = x.to(x_dtype)
         else:
-            x = operator(x, pad, mode)
-        return x
-
-    def run_interpolate(self, operator, x, scale_factor=None):
-        if self.on_npu:
-            x_dtype = x.dtype
-            x = x.to(self.replaced_type)
-            x = operator(x, scale_factor=scale_factor)
-            x = x.to(x_dtype)
-        else:
-            x = operator(x, scale_factor=scale_factor)
+            x = operator(x, size=size, scale_factor=scale_factor)
         return x
 
     def run_attention(self, query, key, value, attention_mask, input_layout, head_dim, head_num):
@@ -222,7 +232,7 @@ class NPUConfig:
         if input_layout not in ["BSH", "BNSD"]:
             raise ValueError(f"input_layout must be in ['BSH', 'BNSD'], but get {input_layout}.")
         Bs, query_tokens, inner_dim = query.shape
-        assert query_tokens % 16 == 0, f"Sequence length of query must be divisible by 16, but got {query_tokens}."
+        # assert query_tokens % 16 == 0, f"Sequence length of query must be divisible by 16, but got {query_tokens}."
         key_tokens = key.shape[1]
         heads = head_num
         query = query.view(Bs, query_tokens, heads, -1)
@@ -277,9 +287,9 @@ class NPUConfig:
         # If we did padding before calculate attention, undo it!
         if head_dim_padding > 0:
             if input_layout == "BNSD":
-                hidden_states = hidden_states_padded[..., :head_dim]
+                hidden_states = hidden_states_padded[:, :, :, :head_dim]
             else:
-                hidden_states = hidden_states_padded.view(Bs, query_tokens, heads, -1)[..., :head_dim]
+                hidden_states = hidden_states_padded.view(Bs, query_tokens, heads, -1)[:, :, :, :head_dim]
                 hidden_states = hidden_states.view(Bs, query_tokens, -1)
         else:
             hidden_states = hidden_states_padded

@@ -45,8 +45,11 @@ class GeneratorWithLoss(nn.Cell):
         learn_logvar: bool = False,
         wavelet_weight=0.01,
         loss_type: str = "l1",
+        print_losses: bool = False,
     ):
         super().__init__()
+
+        self.print_losses = print_losses
 
         # build perceptual models for loss compute
         self.autoencoder = autoencoder
@@ -108,24 +111,40 @@ class GeneratorWithLoss(nn.Cell):
 
         # 2.1 reconstruction loss in pixels
         rec_loss = self.loss_func(x, recons)
-
+        if self.print_losses:
+            print(f"rec_loss {(rec_loss.sum()/rec_loss.shape[0]).asnumpy()}, ")
+            # debug
+            # if (rec_loss.sum()/rec_loss.shape[0]).asnumpy() <0:
+            #    print("negative loss!")
+            #    print(f"x min {x.min()}, max {x.max()}, mean {x.mean()}")
+            #    print(f"recons min {recons.min()}, max {recons.max()}, mean {recons.mean()}")
         # 2.2 perceptual loss
         if self.perceptual_weight > 0:
             p_loss = self.perceptual_loss(x, recons)
             rec_loss = rec_loss + self.perceptual_weight * p_loss
+            if self.print_losses:
+                print(
+                    f"new rec_loss {(rec_loss.sum()/rec_loss.shape[0]).asnumpy()}, "
+                    + f"p_loss: {(p_loss.sum()/p_loss.shape[0]).asnumpy()}"
+                )
+                # if (p_loss.sum()/p_loss.shape[0]).asnumpy()< 0:
+                #    print("negative loss!")
+                #    print(f"x min {x.min()}, max {x.max()}, mean {x.mean()}")
+                #    print(f"recons min {recons.min()}, max {recons.max()}, mean {recons.mean()}")
 
         nll_loss = rec_loss / mint.exp(self.logvar) + self.logvar
         if weights is not None:
             weighted_nll_loss = weights * nll_loss
-            mean_weighted_nll_loss = weighted_nll_loss.sum() / bs
+            mean_weighted_nll_loss = weighted_nll_loss.sum() / weighted_nll_loss.shape[0]
             # mean_nll_loss = nll_loss.sum() / bs
         else:
-            mean_weighted_nll_loss = nll_loss.sum() / bs
+            mean_weighted_nll_loss = nll_loss.sum() / nll_loss.shape[0]
             # mean_nll_loss = mean_weighted_nll_loss
+        nll_loss = nll_loss.sum() / nll_loss.shape[0]
 
         # 2.3 kl loss
         kl_loss = self.kl(mean, logvar)
-        kl_loss = kl_loss.sum() / bs
+        kl_loss = kl_loss.sum() / kl_loss.shape[0]
         if wavelet_coeffs:
             wl_loss_l2 = mint.sum(l1(wavelet_coeffs[0], wavelet_coeffs[1])) / bs
             wl_loss_l3 = mint.sum(l1(wavelet_coeffs[2], wavelet_coeffs[3])) / bs
@@ -150,7 +169,8 @@ class GeneratorWithLoss(nn.Cell):
                 # d_weight = self.calculate_adaptive_weight(mean_nll_loss, g_loss, last_layer=last_layer)
                 d_weight = self.disc_weight
                 loss += d_weight * self.disc_factor * g_loss
-        # print(f"nll_loss: {mean_weighted_nll_loss.asnumpy():.4f}, kl_loss: {kl_loss.asnumpy():.4f}")
+        if self.print_losses:
+            print(f"nll_loss: {mean_weighted_nll_loss.asnumpy():.4f}, kl_loss: {kl_loss.asnumpy():.4f}")
 
         """
         split = "train"

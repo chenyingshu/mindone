@@ -4,13 +4,32 @@ from opensora.acceleration.communications import prepare_parallel_data
 from opensora.acceleration.parallel_states import get_sequence_parallel_state, hccl_info
 
 import mindspore as ms
-from mindspore import nn, ops
+from mindspore import _no_grad, mint, nn, ops
 
 from mindone.diffusers.training_utils import compute_snr
 
 __all__ = ["DiffusionWithLoss"]
 
 logger = logging.getLogger(__name__)
+
+
+@ms.jit_class
+class no_grad(_no_grad):
+    """
+    A context manager that suppresses gradient memory allocation in PyNative mode.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._pynative = ms.get_context("mode") == ms.PYNATIVE_MODE
+
+    def __enter__(self):
+        if self._pynative:
+            super().__enter__()
+
+    def __exit__(self, *args):
+        if self._pynative:
+            super().__exit__(*args)
 
 
 class DiffusionWithLoss(nn.Cell):
@@ -20,7 +39,7 @@ class DiffusionWithLoss(nn.Cell):
         model (nn.Cell): A noise prediction model to denoise the encoded image latents.
         vae (nn.Cell): Variational Auto-Encoder (VAE) Model to encode and decode images to and from latent representations.
         noise_scheduler: (object): A class for noise scheduler, such as DDPM scheduler
-        text_encoder (nn.Cell): A text encoding model which accepts token ids and returns text embeddings in shape (T, D).
+        text_encoder / text_encoder_2 (nn.Cell): A text encoding model which accepts token ids and returns text embeddings in shape (T, D).
             T is the number of tokens, and D is the embedding dimension.
         train_with_embed (bool): whether to train with embeddings (no need vae and text encoder to extract latent features and text embeddings)
     """
@@ -31,6 +50,7 @@ class DiffusionWithLoss(nn.Cell):
         noise_scheduler,
         vae: nn.Cell = None,
         text_encoder: nn.Cell = None,
+        text_encoder_2: nn.Cell = None,  # not to use yet
         text_emb_cached: bool = True,
         video_emb_cached: bool = False,
         use_image_num: int = 0,
@@ -114,7 +134,7 @@ class DiffusionWithLoss(nn.Cell):
                 # (b*f, c, 1, h, w) -> (b*f, c, h, w) -> (b, f, c, h, w) -> (b, c, f, h, w)
                 _, c, _, h, w = images.shape
                 images = images.squeeze(2).reshape(B, self.use_image_num, c, h, w).permute(0, 2, 1, 3, 4)
-                z = ops.cat([videos, images], axis=2)  # b c 16+4, h, w
+                z = mint.cat([videos, images], dim=2)  # b c 16+4, h, w
         else:
             raise ValueError("Incorrect Dimensions of x")
         return z
@@ -125,7 +145,7 @@ class DiffusionWithLoss(nn.Cell):
         attention_mask: ms.Tensor,
         text_tokens: ms.Tensor,
         encoder_attention_mask: ms.Tensor = None,
-    ):
+    ):  # TODO: in the future add 2nd text encoder and tokens
         """
         Video diffusion model forward and loss computation for training
 
@@ -144,14 +164,15 @@ class DiffusionWithLoss(nn.Cell):
         """
         # 1. get image/video latents z using vae
         x = x.to(self.dtype)
-        if not self.video_emb_cached:
-            x = ops.stop_gradient(self.get_latents(x))
+        with no_grad():
+            if not self.video_emb_cached:
+                x = ops.stop_gradient(self.get_latents(x))
 
-        # 2. get conditions
-        if not self.text_emb_cached:
-            text_embed = ops.stop_gradient(self.get_condition_embeddings(text_tokens, encoder_attention_mask))
-        else:
-            text_embed = text_tokens
+            # 2. get conditions
+            if not self.text_emb_cached:
+                text_embed = ops.stop_gradient(self.get_condition_embeddings(text_tokens, encoder_attention_mask))
+            else:
+                text_embed = text_tokens
         loss = self.compute_loss(x, attention_mask, text_embed, encoder_attention_mask)
 
         return loss
@@ -275,14 +296,15 @@ class DiffusionWithLossEval(DiffusionWithLoss):
         """
         # 1. get image/video latents z using vae
         x = x.to(self.dtype)
-        if not self.video_emb_cached:
-            x = ops.stop_gradient(self.get_latents(x))
+        with no_grad():
+            if not self.video_emb_cached:
+                x = ops.stop_gradient(self.get_latents(x))
 
-        # 2. get conditions
-        if not self.text_emb_cached:
-            text_embed = ops.stop_gradient(self.get_condition_embeddings(text_tokens, encoder_attention_mask))
-        else:
-            text_embed = text_tokens
+            # 2. get conditions
+            if not self.text_emb_cached:
+                text_embed = ops.stop_gradient(self.get_condition_embeddings(text_tokens, encoder_attention_mask))
+            else:
+                text_embed = text_tokens
         loss, model_pred, target = self.compute_loss(x, attention_mask, text_embed, encoder_attention_mask)
 
         return loss, model_pred, target

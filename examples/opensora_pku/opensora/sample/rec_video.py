@@ -1,8 +1,19 @@
+"""
+Run causal vae reconstruction on a given video.
+Usage example:
+python examples/rec_video.py \
+    --ae_path path/to/vae/ckpt \
+    --video_path test.mp4 \
+    --rec_path rec.mp4 \
+    --sample_rate 1 \
+    --num_frames 65 \
+    --height 480 \
+    --width 640 \
+"""
 import argparse
 import logging
 import os
 import random
-import re
 import sys
 
 import numpy as np
@@ -22,7 +33,6 @@ import cv2
 from albumentations import Compose, Lambda, Resize, ToFloat
 from opensora.dataset.transform import center_crop_th_tw
 from opensora.models.causalvideovae import ae_wrapper
-from opensora.models.causalvideovae.model.registry import ModelRegistry
 from opensora.npu_config import npu_config
 from opensora.utils.utils import get_precision
 from opensora.utils.video_utils import save_videos
@@ -112,32 +122,14 @@ def main(args):
         state_dict = ms.load_checkpoint(args.ms_checkpoint)
 
         state_dict = dict(
-            [k.replace("autoencoder.", "") if k.startswith("autoencoder.") else k, v] for k, v in state_dict.items()
+            [k.replace("network.", "") if k.startswith("network.") else k, v] for k, v in state_dict.items()
         )
     else:
         state_dict = None
-
-    vae = None
-    if args.model_config is not None:
-        assert os.path.exists(args.model_config), f"`model_config` does not exist! {args.model_config}"
-        pattern = r"^([A-Za-z]+)Model"
-        if re.match(pattern, args.ae):
-            model_name = re.match(pattern, args.ae).group(1)
-            model_cls = ModelRegistry.get_model(model_name)
-            vae = model_cls.from_config(args.model_config, dtype=dtype)
-            if args.ms_checkpoint is None or not os.path.exists(args.ms_checkpoint):
-                logger.warning(
-                    "VAE is randomly initialized. The inference results may be incorrect! Check `ms_checkpoint`!"
-                )
-
-        else:
-            logger.warning(f"Incorrect ae name, must be one of {ae_wrapper.keys()}")
-
     kwarg = {
         "state_dict": state_dict,
         "use_safetensors": True,
         "dtype": dtype,
-        "vae": vae,
     }
     vae = ae_wrapper[args.ae](args.ae_path, **kwarg)
 
@@ -225,9 +217,6 @@ if __name__ == "__main__":
     parser.add_argument("--jit_level", default="O0", help="Set jit level: # O0: KBK, O1:DVM, O2: GE")
     parser.add_argument(
         "--jit_syntax_level", default="strict", choices=["strict", "lax"], help="Set jit syntax level: strict or lax"
-    )
-    parser.add_argument(
-        "--model_config", type=str, default=None, help="The model config file for initiating vae model."
     )
     args = parser.parse_args()
     main(args)

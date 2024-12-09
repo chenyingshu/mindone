@@ -1,11 +1,13 @@
 import logging
+import math
 import os
 from typing import List
 
 from opensora.npu_config import npu_config
 
 import mindspore as ms
-from mindspore import mint, nn
+from mindspore import mint, nn, ops
+from mindspore.common.initializer import HeUniform, Uniform
 
 from mindone.diffusers import __version__
 from mindone.diffusers.configuration_utils import register_to_config
@@ -58,6 +60,8 @@ class Encoder(VideoBaseAE):
                 padding=1,
                 pad_mode="pad",
                 has_bias=True,
+                weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                bias_init=Uniform(scale=1 / math.sqrt(24 * 3 * 3)),
             ).to_float(dtype),
             *[
                 ResnetBlock2D(
@@ -80,6 +84,8 @@ class Encoder(VideoBaseAE):
                 padding=1,
                 pad_mode="pad",
                 has_bias=True,
+                weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                bias_init=Uniform(scale=1 / math.sqrt((base_channels + energy_flow_hidden_size) * 3 * 3)),
             ).to_float(dtype),
             *[
                 ResnetBlock3D(
@@ -107,6 +113,8 @@ class Encoder(VideoBaseAE):
             padding=1,
             pad_mode="pad",
             has_bias=True,
+            weight_init=HeUniform(negative_slope=math.sqrt(5)),
+            bias_init=Uniform(scale=1 / math.sqrt(l1_channels * 3 * 3)),
         ).to_float(dtype)
         self.connect_l2 = Conv2d(
             24,
@@ -116,6 +124,8 @@ class Encoder(VideoBaseAE):
             padding=1,
             pad_mode="pad",
             has_bias=True,
+            weight_init=HeUniform(negative_slope=math.sqrt(5)),
+            bias_init=Uniform(scale=1 / math.sqrt(24 * 3 * 3)),
         ).to_float(dtype)
         # Mid
         mid_layers = [
@@ -289,6 +299,8 @@ class Decoder(VideoBaseAE):
                 padding=1,
                 pad_mode="pad",
                 has_bias=True,
+                weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                bias_init=Uniform(scale=1 / math.sqrt(base_channels * 3 * 3)),
             ).to_float(dtype),
         )
         self.connect_l2 = nn.SequentialCell(
@@ -310,6 +322,8 @@ class Decoder(VideoBaseAE):
                 padding=1,
                 pad_mode="pad",
                 has_bias=True,
+                weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                bias_init=Uniform(scale=1 / math.sqrt(base_channels * 3 * 3)),
             ).to_float(dtype),
         )
         # Out
@@ -322,6 +336,8 @@ class Decoder(VideoBaseAE):
             padding=1,
             pad_mode="pad",
             has_bias=True,
+            weight_init=HeUniform(negative_slope=math.sqrt(5)),
+            bias_init=Uniform(scale=1 / math.sqrt(base_channels * 3 * 3)),
         ).to_float(dtype)
 
         self.inverse_wavelet_tranform_l1 = resolve_str_to_obj(l1_upsample_wavelet)(dtype=dtype)
@@ -378,6 +394,7 @@ class WFVAEModel(VideoBaseAE):
         l2_upsample_block: str = "Spatial2xTime2x3DUpsample",
         l2_upsample_wavelet: str = "InverseHaarWaveletTransform3D",
         dtype=ms.float32,
+        use_recompute=False,
     ) -> None:
         super().__init__()
         self.use_tiling = False
@@ -426,9 +443,23 @@ class WFVAEModel(VideoBaseAE):
         )
 
         self.exp = mint.exp
-        self.stdnormal = mint.normal
+        self.stdnormal = ops.standard_normal
 
         self.update_parameters_name()  # update parameter names to solve pname mismatch
+        if use_recompute:
+            self.recompute(self.encoder)
+            self.recompute(self.decoder)
+            if self.use_quant_layer:
+                self.recompute(self.quant_conv)
+                self.recompute(self.post_quant_conv)
+
+    def recompute(self, b):
+        if not b._has_config_recompute:
+            b.recompute(parallel_optimizer_comm_recompute=True)
+        if isinstance(b, nn.CellList):
+            self.recompute(b[-1])
+        elif ms.get_context("mode") == ms.GRAPH_MODE:
+            b.add_flags(output_no_recompute=True)
 
     def get_encoder(self):
         if self.use_quant_layer:
@@ -546,7 +577,7 @@ class WFVAEModel(VideoBaseAE):
         # sample z from latent distribution
         logvar = mint.clamp(logvar, -30.0, 20.0)
         std = self.exp(0.5 * logvar)
-        z = mean + std * self.stdnormal(size=mean.shape)
+        z = mean + std * self.stdnormal(mean.shape)
 
         return z
 
@@ -715,64 +746,6 @@ class WFVAEModel(VideoBaseAE):
             return model, loading_info
 
         return model
-
-    def init_from_vae2d(self, path):
-        # default: tail init
-        # path: path to vae 2d model ckpt
-        vae2d_sd = ms.load_checkpoint(path)
-        vae_2d_keys = list(vae2d_sd.keys())
-        vae_3d_keys = list(self.parameters_dict().keys())
-
-        # 3d -> 2d
-        map_dict = {
-            "conv.weight": "weight",
-            "conv.bias": "bias",
-        }
-
-        new_state_dict = {}
-        for key_3d in vae_3d_keys:
-            if key_3d.startswith("loss"):
-                continue
-
-            # param name mapping from vae-3d to vae-2d
-            key_2d = key_3d
-            for kw in map_dict:
-                key_2d = key_2d.replace(kw, map_dict[kw])
-
-                assert key_2d in vae_2d_keys, f"Key {key_2d} ({key_3d}) should be in 2D VAE"
-
-            # set vae 3d state dict
-            shape_3d = self.parameters_dict()[key_3d].shape
-            shape_2d = vae2d_sd[key_2d].shape
-            if "bias" in key_2d:
-                assert shape_3d == shape_2d, f"Shape mismatch for key {key_3d} ({key_2d})"
-                new_state_dict[key_3d] = vae2d_sd[key_2d]
-            elif "norm" in key_2d:
-                assert shape_3d == shape_2d, f"Shape mismatch for key {key_3d} ({key_2d})"
-                new_state_dict[key_3d] = vae2d_sd[key_2d]
-            elif "conv" in key_2d or "nin_shortcut" in key_2d:
-                if shape_3d[:2] != shape_2d[:2]:
-                    logger.info(key_2d, shape_3d, shape_2d)
-                w = vae2d_sd[key_2d]
-                new_w = mint.zeros(shape_3d, dtype=w.dtype)
-                # tail initialization
-                new_w[:, :, -1, :, :] = w  # cin, cout, t, h, w
-
-                new_w = ms.Parameter(new_w, name=key_3d)
-
-                new_state_dict[key_3d] = new_w
-            elif "attn_1" in key_2d:
-                new_val = vae2d_sd[key_2d].expand_dims(axis=2)
-                new_param = ms.Parameter(new_val, name=key_3d)
-                new_state_dict[key_3d] = new_param
-            else:
-                raise NotImplementedError(f"Key {key_3d} ({key_2d}) not implemented")
-
-            m, u = ms.load_param_into_net(self, new_state_dict)
-            if len(m) > 0:
-                logger.info("net param not loaded: ", m)
-            if len(u) > 0:
-                logger.info("checkpoint param not loaded: ", u)
 
     def init_from_ckpt(self, path, ignore_keys=list()):
         # TODO: support auto download pretrained checkpoints

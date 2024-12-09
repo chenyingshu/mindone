@@ -1,4 +1,8 @@
+import math
 from typing import Tuple, Union
+
+import mindspore as ms
+from mindspore.common.initializer import HeUniform, Uniform
 
 try:
     from opensora.npu_config import npu_config
@@ -74,9 +78,21 @@ class CausalConv3d(nn.Cell):
         self.stride = kwargs.pop("stride", 1)
         self.padding = kwargs.pop("padding", 0)
         self.stride = cast_tuple(self.stride, 3)
+        conv_dtype = npu_config.conv_dtype if npu_config is not None else ms.bfloat16
         if self.padding == 0:
             self.conv = nn.Conv3d(
-                chan_in, chan_out, self.kernel_size, stride=self.stride, pad_mode="valid", has_bias=bias, **kwargs
+                chan_in,
+                chan_out,
+                self.kernel_size,
+                stride=self.stride,
+                pad_mode="valid",
+                has_bias=bias,
+                weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                bias_init=Uniform(
+                    scale=1 / math.sqrt(chan_in * self.kernel_size[0] * self.kernel_size[1] * self.kernel_size[2])
+                ),
+                dtype=conv_dtype,
+                **kwargs,
             )
         else:
             self.padding = list(cast_tuple(self.padding, 6))
@@ -91,6 +107,11 @@ class CausalConv3d(nn.Cell):
                 padding=tuple(self.padding),
                 pad_mode="pad",
                 has_bias=bias,
+                weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                bias_init=Uniform(
+                    scale=1 / math.sqrt(chan_in * self.kernel_size[0] * self.kernel_size[1] * self.kernel_size[2])
+                ),
+                dtype=conv_dtype,
                 **kwargs,
             )
         self.enable_cached = enable_cached

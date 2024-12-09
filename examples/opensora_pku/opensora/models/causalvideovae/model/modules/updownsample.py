@@ -1,12 +1,19 @@
+import math
 from typing import Tuple, Union
 
 from opensora.npu_config import npu_config
 
 import mindspore as ms
 from mindspore import mint, nn, ops
+from mindspore.common.initializer import HeUniform, Uniform
 
 from .conv import CausalConv3d
 from .ops import cast_tuple, video_to_image
+
+
+class ResizeNearestNeighbor(nn.Cell):
+    def construct(self, x, size, scale_factor=None):
+        return ops.interpolate(x, size=size, scale_factor=scale_factor, mode="nearest")
 
 
 class Upsample(nn.Cell):
@@ -16,14 +23,23 @@ class Upsample(nn.Cell):
         self.with_conv = with_conv
         if self.with_conv:
             self.conv = nn.Conv2d(
-                in_channels, out_channels, kernel_size=3, stride=1, pad_mode="pad", padding=1, has_bias=True
+                in_channels,
+                out_channels,
+                kernel_size=3,
+                stride=1,
+                pad_mode="pad",
+                padding=1,
+                has_bias=True,
+                weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                bias_init=Uniform(scale=1 / math.sqrt(in_channels * 3 * 3)),
             ).to_float(self.dtype)
+        self.resize = ResizeNearestNeighbor()
 
     @video_to_image
     def construct(self, x):
         in_shape = x.shape[-2:]
         out_shape = tuple(2 * x for x in in_shape)
-        x = ops.ResizeNearestNeighbor(out_shape)(x)
+        x = npu_config.run_interpolate(self.resize, x, size=out_shape)
         if self.with_conv:
             x = self.conv(x)
         return x
@@ -39,11 +55,27 @@ class Downsample(nn.Cell):
             # no asymmetric padding in torch conv, must do it ourselves
             if self.undown:
                 self.conv = nn.Conv2d(
-                    in_channels, out_channels, kernel_size=3, stride=1, padding=1, pad_mode="pad", has_bias=True
+                    in_channels,
+                    out_channels,
+                    kernel_size=3,
+                    stride=1,
+                    padding=1,
+                    pad_mode="pad",
+                    has_bias=True,
+                    weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                    bias_init=Uniform(scale=1 / math.sqrt(in_channels * 3 * 3)),
                 ).to_float(self.dtype)
             else:
                 self.conv = nn.Conv2d(
-                    in_channels, out_channels, kernel_size=3, stride=2, padding=0, pad_mode="pad", has_bias=True
+                    in_channels,
+                    out_channels,
+                    kernel_size=3,
+                    stride=2,
+                    padding=0,
+                    pad_mode="pad",
+                    has_bias=True,
+                    weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                    bias_init=Uniform(scale=1 / math.sqrt(in_channels * 3 * 3)),
                 ).to_float(self.dtype)
 
     @video_to_image
@@ -272,8 +304,8 @@ class TimeUpsampleRes2x(nn.Cell):
 
 
 class TrilinearInterpolate(nn.Cell):
-    def construct(self, x, scale_factor):
-        return ops.interpolate(x, scale_factor=scale_factor, mode="trilinear")
+    def construct(self, x, scale_factor, size=None):
+        return ops.interpolate(x, scale_factor=scale_factor, size=size, mode="trilinear")
 
 
 class Spatial2xTime2x3DUpsample(nn.Cell):

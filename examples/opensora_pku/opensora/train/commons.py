@@ -34,7 +34,7 @@ def parse_train_args(parser):
     #################################################################################
     parser.add_argument("--device", type=str, default="Ascend", help="Ascend or GPU")
     parser.add_argument("--max_device_memory", type=str, default=None, help="e.g. `30GB` for 910a, `59GB` for 910b")
-    parser.add_argument("--mode", default=0, type=int, help="Specify the mode: 0 for graph mode, 1 for pynative mode")
+    parser.add_argument("--mode", default=1, type=int, help="Specify the mode: 0 for graph mode, 1 for pynative mode")
     parser.add_argument(
         "--jit_syntax_level", default="strict", type=str, help="Specify syntax level for graph mode: strict or lax"
     )
@@ -204,7 +204,8 @@ def parse_train_args(parser):
         help="whether to compute the validation set loss during training",
     )
     parser.add_argument("--val_interval", default=1, type=int, help="Validation frequency in epochs")
-    parser.add_argument("--profile", default=False, type=str2bool, help="Profile or not")
+    parser.add_argument("--profile", default=False, type=str2bool, help="Profile time analysis or not")
+    parser.add_argument("--profile_memory", default=False, type=str2bool, help="Profile memory analysis or not")
     parser.add_argument(
         "--log_level",
         type=str,

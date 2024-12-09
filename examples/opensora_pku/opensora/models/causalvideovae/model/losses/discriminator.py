@@ -1,9 +1,11 @@
 import functools
+import math
 
 from opensora.npu_config import npu_config
 
 import mindspore as ms
 from mindspore import nn
+from mindspore.common.initializer import HeUniform, Uniform
 
 
 def weights_init(m):
@@ -38,11 +40,23 @@ class NLayerDiscriminator3D(nn.Cell):
             use_bias = norm_layer.func != nn.BatchNorm3d
         else:
             use_bias = norm_layer != nn.BatchNorm3d
+        conv_dtype = npu_config.conv_dtype if npu_config is not None else ms.bfloat16
 
         kw = 3
         padw = 1
         sequence = [
-            nn.Conv3d(input_nc, ndf, kernel_size=kw, stride=2, pad_mode="pad", padding=padw, has_bias=True),
+            nn.Conv3d(
+                input_nc,
+                ndf,
+                kernel_size=kw,
+                stride=2,
+                pad_mode="pad",
+                padding=padw,
+                has_bias=True,
+                weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                bias_init=Uniform(scale=1 / math.sqrt(input_nc * kw * kw * kw)),
+                dtype=conv_dtype,
+            ),
             nn.LeakyReLU(0.2).to_float(self.dtype),
         ]
         nf_mult = 1
@@ -59,6 +73,9 @@ class NLayerDiscriminator3D(nn.Cell):
                     padding=padw,
                     pad_mode="pad",
                     has_bias=use_bias,
+                    weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                    bias_init=Uniform(scale=1 / math.sqrt(ndf * nf_mult_prev * kw * kw * kw)),
+                    dtype=conv_dtype,
                 ),
                 norm_layer(ndf * nf_mult),
                 nn.LeakyReLU(0.2).to_float(self.dtype),
@@ -75,13 +92,27 @@ class NLayerDiscriminator3D(nn.Cell):
                 padding=padw,
                 pad_mode="pad",
                 has_bias=use_bias,
+                weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                bias_init=Uniform(scale=1 / math.sqrt(ndf * nf_mult_prev * kw * kw * kw)),
+                dtype=conv_dtype,
             ),
             norm_layer(ndf * nf_mult),
             nn.LeakyReLU(0.2).to_float(self.dtype),
         ]
 
         sequence += [
-            nn.Conv3d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw, pad_mode="pad", has_bias=True)
+            nn.Conv3d(
+                ndf * nf_mult,
+                1,
+                kernel_size=kw,
+                stride=1,
+                padding=padw,
+                pad_mode="pad",
+                has_bias=True,
+                weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                bias_init=Uniform(scale=1 / math.sqrt(ndf * nf_mult * kw * kw * kw)),
+                dtype=conv_dtype,
+            )
         ]  # output 1 channel prediction map
         self.main = nn.CellList(sequence)
 
