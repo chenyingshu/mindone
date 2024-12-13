@@ -118,19 +118,16 @@ For EulerOS, instructions on ffmpeg and decord installation are as follows.
 
 ## Model Weights
 
-### Open-Sora-Plan v1.2.0 Model Weights
+### Open-Sora-Plan v1.3.0 Model Weights
 
-Please download the torch checkpoint of mT5-xxl from [google/mt5-xxl](https://huggingface.co/google/mt5-xxl/tree/main), and download the opensora v1.2.0 models' weights from [LanguageBind/Open-Sora-Plan-v1.2.0](https://huggingface.co/LanguageBind/Open-Sora-Plan-v1.2.0/tree/main). Place them under `examples/opensora_pku` as shown below:
+Please download the torch checkpoint of mT5-xxl from [google/mt5-xxl](https://huggingface.co/google/mt5-xxl/tree/main), and download the opensora v1.2.0 models' weights from [LanguageBind/Open-Sora-Plan-v1.3.0](https://huggingface.co/LanguageBind/Open-Sora-Plan-v1.3.0/tree/main). Place them under `examples/opensora_pku` as shown below:
 ```bash
 mindone/examples/opensora_pku
 ├───LanguageBind
-│   └───Open-Sora-Plan-v1.2.0
-│       ├───1x480p/
-│       ├───29x480p/
-│       ├───29x720p/
-│       ├───93x480p/
-│       ├───93x480p_i2v/
-│       ├───93x720p/
+│   └───Open-Sora-Plan-v1.3.0
+│       ├───any93x640x640/
+│       ├───any93x640x640_i2v/
+│       ├───prompt_refiner/
 │       └───vae/
 └───google/
     └───mt5-xxl/
@@ -145,7 +142,7 @@ mindone/examples/opensora_pku
 Currently, we can load `.safetensors` files directly in MindSpore, but not `.bin` or `.ckpt` files. We recommend you to convert the
 `vae/checkpoint.ckpt` and `mt5-xxl/pytorch_model.bin` files to `.safetensor` files manually by running the following commands:
 ```shell
-python tools/model_conversion/convert_pytorch_ckpt_to_safetensors.py --src LanguageBind/Open-Sora-Plan-v1.2.0/vae/checkpoint.ckpt --target LanguageBind/Open-Sora-Plan-v1.2.0/vae/diffusion_pytorch_model.safetensors  --config LanguageBind/Open-Sora-Plan-v1.2.0/vae/config.json
+python tools/model_conversion/convert_wfvae.py --src LanguageBind/Open-Sora-Plan-v1.3.0/vae/merged.ckpt --target LanguageBind/Open-Sora-Plan-v1.3.0/vae/diffusion_pytorch_model.safetensors  --config LanguageBind/Open-Sora-Plan-v1.3.0/vae/config.json
 
 python tools/model_conversion/convert_pytorch_ckpt_to_safetensors.py --src google/mt5-xxl/pytorch_model.bin --target google/mt5-xxl/model.safetensors  --config google/mt5-xxl/config.json
 ```
@@ -159,47 +156,66 @@ Once the checkpoint files have all been prepared, you can refer to the inference
 You can run video-to-video reconstruction task using `scripts/causalvae/rec_video.sh`:
 ```bash
 python examples/rec_video.py \
-    --ae_path LanguageBind/Open-Sora-Plan-v1.2.0/vae \
+    --ae "WFVAEModel_D8_4x8x8" \
+    --ae_path LanguageBind/Open-Sora-Plan-v1.3.0/vae \
     --video_path test.mp4 \
     --rec_path rec.mp4 \
     --device Ascend \
     --sample_rate 1 \
-    --num_frames 65 \
-    --height 480 \
-    --width 640 \
+    --num_frames 61 \
+    --height 512 \
+    --width 512 \
+    --fps 30 \
     --enable_tiling \
-    --tile_overlap_factor 0.125 \
-    --save_memory
+    --mode 1 \
 ```
 Please change the `--video_path` to the existing video file path and `--rec_path` to the reconstructed video file path. You can set `--grid` to save the original video and the reconstructed video in the same output file.
 
 You can also run video reconstruction given an input video folder. See `scripts/causalvae/rec_video_folder.sh`.
 
-### Open-Sora-Plan v1.2.0 Command Line Inference
+### Open-Sora-Plan v1.3.0 Command Line Inference
 
-You can run text-to-video inference on a single Ascend device using the script `scripts/text_condition/single-device/sample_t2v_29x720p.sh`.
+You need download the models manually.
+First, you need to download checkpoint including [diffusion model](https://huggingface.co/LanguageBind/Open-Sora-Plan-v1.3.0/tree/main/any93x640x640), [vae](https://huggingface.co/LanguageBind/Open-Sora-Plan-v1.3.0/tree/main/vae) and [text encoder](https://huggingface.co/google/mt5-xxl), and optional [second text encoder](https://huggingface.co/laion/CLIP-ViT-bigG-14-laion2B-39B-b160k). The [prompt refiner](https://huggingface.co/LanguageBind/Open-Sora-Plan-v1.3.0/tree/main/prompt_refiner) is optional.
+
+
+
+
+You can run text-to-video inference on a single Ascend device using the script `scripts/text_condition/single-device/sample_t2v_93x640.sh` by modifying `--model_path`, `--text_encoder_name_1` and `--ae_path`. The `--caption_refiner`  and `--text_encoder_name_2` are optional.
+
+<!-- We provide multiple inference scripts to support various requirements. We recommend configuration `--guidance_scale 7.5 --num_sampling_steps 100 --sample_method EulerAncestralDiscrete` for sampling. -->
+
 ```bash
-python opensora/sample/sample_t2v.py \
-    --model_path LanguageBind/Open-Sora-Plan-v1.2.0/29x720p \
-    --num_frames 29 \
-    --height 720 \
-    --width 1280 \
-    --cache_dir "./" \
-    --text_encoder_name google/mt5-xxl \
+# Single NPU
+python opensora/sample/sample.py \
+    --model_path LanguageBind/Open-Sora-Plan-v1.3.0/any93x640x640 \
+    --version v1_3 \
+    --num_frames 93 \
+    --height 352 \
+    --width 640 \
+    --text_encoder_name_1 google/mt5-xxl \
     --text_prompt examples/prompt_list_0.txt \
-    --ae CausalVAEModel_D4_4x8x8  \
-    --ae_path LanguageBind/Open-Sora-Plan-v1.2.0/vae\
-    --save_img_path "./sample_videos/prompt_list_0_29x720p" \
-    --fps 24 \
+    --ae WFVAEModel_D8_4x8x8  \
+    --ae_path LanguageBind/Open-Sora-Plan-v1.3.0/vae \
+    --save_img_path "./sample_videos/prompt_list_0_93x640" \
+    --fps 18 \
     --guidance_scale 7.5 \
     --num_sampling_steps 100 \
     --enable_tiling \
     --max_sequence_length 512 \
     --sample_method EulerAncestralDiscrete \
-    --model_type "dit" \
+    --num_samples_per_prompt 1 \
+    --rescale_betas_zero_snr \
+    --prediction_type "v_prediction" \
+    --mode 1
 ```
-You can change the `num_frames`, `height` and `width` to match with the training shape of different checkpoints, e.g., `29x480p` requires `num_frames=29`, `height=480` and `width=640`. In case of oom on your device, you can try to append `--save_memory` to the command above, which enables a more radical tiling strategy for causal vae.
+You can change the `num_frames`, `height` and `width`.
+Note that DiT model is trained arbitrarily on stride=32. 
+So keep the resolution of the inference a multiple of 32. `num_frames` needs to be 4n+1, e.g. 93, 77, 61, 45, 29, 1.
 
+<!-- In case of oom on your device, you can try to append `--save_memory` to the command above, which enables a more radical tiling strategy for causal vae. -->
+
+**To be revised.**
 
 If you want to run a multi-device inference, e.g., 8 cards, please use `msrun` and pass `--use_parallel=True` as the example below:
 

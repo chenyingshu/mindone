@@ -61,7 +61,7 @@ def getdataset(args, dataset_file):
     # )
 
     tokenizer = AutoTokenizer.from_pretrained(args.text_encoder_name_1, cache_dir=args.cache_dir)
-    if args.text_encoder_name_2 is not None: # not to use yet
+    if args.text_encoder_name_2 is not None:
         tokenizer_2 = AutoTokenizer.from_pretrained(args.text_encoder_name_2, cache_dir=args.cache_dir)
 
     if args.dataset == "t2v":

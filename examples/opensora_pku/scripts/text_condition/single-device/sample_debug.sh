@@ -5,10 +5,13 @@
 # - fps: 24
 # - precision: bf16 (Some exceptions ref to sample_utils.py.  Torch ver doesn't share, always uses fp16. )
 
+# Debug first prompt only:
+# "A young man at his 20s is sitting on a piece of cloud in the sky, reading a book."
+
 # To use: 
 # change model_path, text_encoder_name_1, ae_path, save_img_path before running the script.
 
-export DEVICE_ID=4
+export DEVICE_ID=0
 python opensora/sample/sample.py \
     --model_path /home_host/susan/workspace/checkpoints/LanguageBind/Open-Sora-Plan-v1.3.0/any93x640x640 \
     --version v1_3 \
@@ -30,4 +33,4 @@ python opensora/sample/sample.py \
     --num_samples_per_prompt 1 \
     --rescale_betas_zero_snr \
     --prediction_type "v_prediction" \
-    --mode 1 --precision bf16 --saved_prompt1_dir ./embed.npz
+    --mode 1 --precision bf16 
