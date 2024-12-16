@@ -279,7 +279,7 @@ class OpenSoraAttnProcessor2_0:
                 hidden_states.shape if encoder_hidden_states is None else encoder_hidden_states.shape
             )  # BSH
 
-        # print(f"hidden_states.shape {hidden_states.shape}") #BSH
+        # print(f"hidden_states.shape {hidden_states.shape}") #SBH or BSH
         query = attn.to_q(hidden_states)
 
         if encoder_hidden_states is None:
@@ -293,7 +293,7 @@ class OpenSoraAttnProcessor2_0:
         FA_head_num = attn.heads
         total_frame = frame
 
-        if get_sequence_parallel_state():  # TODO: to test
+        if get_sequence_parallel_state():  
             sp_size = hccl_info.world_size
             FA_head_num = attn.heads // sp_size
             total_frame = frame * sp_size
@@ -303,8 +303,8 @@ class OpenSoraAttnProcessor2_0:
             value = self.alltoall_sbh_v(value.view(-1, attn.heads, head_dim))
 
             # print(f'batch: {batch_size}, FA_head_num: {FA_head_num}, head_dim: {head_dim}, total_frame:{total_frame}')
-            query = query.view(-1, batch_size, FA_head_num, head_dim)  # BUG? TODO: to test
-            key = key.view(-1, batch_size, FA_head_num, head_dim)  # BUG ?
+            query = query.view(-1, batch_size, FA_head_num, head_dim)  
+            key = key.view(-1, batch_size, FA_head_num, head_dim)  
 
             # print(f'q {query.shape}, k {key.shape}, v {value.shape}')
             if not self.is_cross_attn:

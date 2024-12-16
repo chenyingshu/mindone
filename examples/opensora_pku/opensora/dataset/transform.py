@@ -105,7 +105,7 @@ def get_params(h, w, stride):
 
     return i, j, th, tw
 
-def spatial_stride_crop_video(image, stride):
+def spatial_stride_crop_video(image, stride, **kwargs):
     """
     Args:
         image (numpy array): Video clip to be cropped. Size is (H, W, C)
@@ -117,7 +117,7 @@ def spatial_stride_crop_video(image, stride):
     i, j, h, w = get_params(h, w, stride)
     return crop(image, i, j, h, w)
 
-def maxhxw_resize(image, max_hxw, interpolation_mode):
+def maxhxw_resize(image, max_hxw, interpolation_mode, **kwargs):
         """
             First use the h*w,
             then resize to the specified size
@@ -136,7 +136,7 @@ def maxhxw_resize(image, max_hxw, interpolation_mode):
             tr_w = w
         if h == tr_h and w == tr_w:
             return image
-        resize_image = resize(images, tr_h, tr_w, interpolation_mode)
+        resize_image = resize(image, tr_h, tr_w, interpolation_mode)
         return resize_image
 
 # create text transform(preprocess)
