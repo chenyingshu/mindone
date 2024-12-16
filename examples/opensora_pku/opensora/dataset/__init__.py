@@ -18,14 +18,14 @@ def getdataset(args, dataset_file):
 
     mapping = {"bilinear": cv2.INTER_LINEAR, "bicubic": cv2.INTER_CUBIC}
     targets = {"image{}".format(i): "image" for i in range(args.num_frames)}
-    # resize_topcrop = [
-    #     Lambda(
-    #         name="crop_topcrop",
-    #         image=partial(center_crop_th_tw, th=args.max_height, tw=args.max_width, top_crop=True),
-    #         p=1.0,
-    #     ),
-    #     Resize(args.max_height, args.max_width, interpolation=mapping["bilinear"]),
-    # ]
+    resize_topcrop = [
+        Lambda(
+            name="crop_topcrop",
+            image=partial(center_crop_th_tw, th=args.max_height, tw=args.max_width, top_crop=True),
+            p=1.0,
+        ),
+        Resize(args.max_height, args.max_width, interpolation=mapping["bilinear"]),
+    ]
     if args.force_resolution:
         assert (args.max_height is not None) and (args.max_width is not None), "set max_height and max_width for fixed resolution"
         resize = [
@@ -55,10 +55,10 @@ def getdataset(args, dataset_file):
         [*resize, ToFloat(255.0), Lambda(name="ae_norm", image=norm_func_albumentation, p=1.0)],
         additional_targets=targets,
     )
-    # transform_topcrop = Compose(
-    #     [*resize_topcrop, ToFloat(255.0), Lambda(name="ae_norm", image=norm_func_albumentation, p=1.0)],
-    #     additional_targets=targets,
-    # )
+    transform_topcrop = Compose(
+        [*resize_topcrop, ToFloat(255.0), Lambda(name="ae_norm", image=norm_func_albumentation, p=1.0)],
+        additional_targets=targets,
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(args.text_encoder_name_1, cache_dir=args.cache_dir)
     if args.text_encoder_name_2 is not None:
@@ -83,7 +83,7 @@ def getdataset(args, dataset_file):
             transform=transform,
             temporal_sample=temporal_sample,
             tokenizer=tokenizer,
-            transform_topcrop=None, # transform_topcrop # no use yet
+            transform_topcrop=transform_topcrop,
         )
     elif args.dataset == "inpaint" or args.dataset == "i2v":
         raise NotImplementedError
