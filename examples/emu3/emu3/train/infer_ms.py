@@ -54,10 +54,11 @@ def load_net(model, model_file):
         if k.startswith("network."):
             k = k.replace("network.", "")
         k = k.replace("_backbone.", "")
+        state_dict_tmp[k] = v
     state_dict = state_dict_tmp
 
     # Instantiate the model
-    param_not_load, ckpt_not_load = ms.load_param_into_net(model, state_dict, filter=state_dict.keys())
+    param_not_load, ckpt_not_load = ms.load_param_into_net(model, state_dict)
     print(f"Loaded checkpoint: param_not_load {param_not_load}, ckpt_not_load {ckpt_not_load}")
     if param_not_load or ckpt_not_load:
         print(
@@ -106,7 +107,7 @@ def evaluate(args):
 
     # load pretrained checkpoint
     logger.info(f"Loading ckpt in {args.model_path}.")
-    # ckpt_folder = os.path.join(args.model_path, f"rank_{rank_id}", "ckpt")
+
     epoch_num = load_net(model, args.ckpt_dir)
     logger.info(f"Loaded checkpoint at Epoch #{epoch_num}")
 
@@ -129,7 +130,7 @@ def evaluate(args):
     start_time = time.time()
 
     text = [args.prompt]
-    image = []
+    image = None
     if args.image is not None:
         image = Image.open(args.image)
         image = [image]
