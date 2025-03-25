@@ -297,7 +297,7 @@ def main():
                 ckpt_max_keep=training_args.save_total_limit,
                 ckpt_save_interval=training_args.save_steps,
                 step_mode=True if training_args.save_strategy == "steps" else False,  # epoch/steps, default: steps
-                ckpt_combine_online=False,  # Optional. If False, do offline ckpt combine
+                ckpt_combine_online=True,  # Optional. If False, do offline ckpt combine
             )
         )
     # if rank_id == 0:
