@@ -10,7 +10,12 @@ from typing import List, Optional, Union
 from mindone.transformers.feature_extraction_utils import BatchFeature
 from mindone.transformers.image_utils import ImageInput
 from mindone.transformers.processing_utils import ProcessorMixin
-from mindone.transformers.tokenization_utils_base import PaddingStrategy, PreTokenizedInput, TextInput, TruncationStrategy
+from mindone.transformers.tokenization_utils_base import (
+    PaddingStrategy,
+    PreTokenizedInput,
+    TextInput,
+    TruncationStrategy,
+)
 from mindone.transformers.utils import TensorType
 
 
@@ -42,7 +47,7 @@ class SiglipProcessor(ProcessorMixin):
         padding: Union[bool, str, PaddingStrategy] = False,
         truncation: Union[bool, str, TruncationStrategy] = None,
         max_length: int = None,
-        return_tensors: Optional[Union[str, TensorType]] = TensorType.PYTORCH,
+        return_tensors: Optional[Union[str, TensorType]] = TensorType.MINDSPORE,
     ) -> BatchFeature:
         """
         Main method to prepare for the model one or several sequences(s) and image(s). This method forwards the `text`
@@ -57,7 +62,7 @@ class SiglipProcessor(ProcessorMixin):
                 (pretokenized string). If the sequences are provided as list of strings (pretokenized), you must set
                 `is_split_into_words=True` (to lift the ambiguity with a batch of sequences).
             images (`PIL.Image.Image`, `np.ndarray`, `torch.Tensor`, `List[PIL.Image.Image]`, `List[np.ndarray]`, `List[torch.Tensor]`):
-                The image or batch of images to be prepared. Each image can be a PIL image, NumPy array or PyTorch
+                The image or batch of images to be prepared. Each image can be a PIL image, NumPy array or MindSpore
                 tensor. Both channels-first and channels-last formats are supported.
             padding (`bool`, `str` or [`~utils.PaddingStrategy`], *optional*, defaults to `False`):
                 Select a strategy to pad the returned sequences (according to the model's padding side and padding

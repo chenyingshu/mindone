@@ -9,12 +9,13 @@
 #
 # This modified file is released under the same license.
 
-import mindspore as ms
-from mindspore import nn, mint, ops
-
-from transformers.activations import ACT2FN
 from modeling.siglip.configuration_siglip import SiglipVisionConfig as _SiglipVisionConfig
 from modeling.siglip.modeling_siglip import SiglipAttention, SiglipPreTrainedModel
+
+import mindspore as ms
+from mindspore import mint, nn, ops
+
+from mindone.transformers.activations import ACT2FN
 
 
 class SiglipVisionConfig(_SiglipVisionConfig):
@@ -42,7 +43,7 @@ class SiglipVisionConfig(_SiglipVisionConfig):
             The size (resolution) of each image.
         patch_size (`int`, *optional*, defaults to 16):
             The size (resolution) of each patch.
-        hidden_act (`str` or `function`, *optional*, defaults to `"gelu_mindspore_tanh"`):
+        hidden_act (`str` or `function`, *optional*, defaults to `"gelu_pytorch_tanh"`):
             The non-linear activation function (function or string) in the encoder and pooler. If string, `"gelu"`,
             `"relu"`, `"selu"` and `"gelu_new"` `"quick_gelu"` are supported.
         layer_norm_eps (`float`, *optional*, defaults to 1e-06):
@@ -76,7 +77,7 @@ class SiglipVisionConfig(_SiglipVisionConfig):
         num_channels=3,
         image_size=224,
         patch_size=16,
-        hidden_act="gelu_mindspore_tanh",
+        hidden_act="gelu_pytorch_tanh",
         layer_norm_eps=1e-6,
         attention_dropout=0.0,
         rope=True,
@@ -93,7 +94,8 @@ class SiglipVisionConfig(_SiglipVisionConfig):
             hidden_act=hidden_act,
             layer_norm_eps=layer_norm_eps,
             attention_dropout=attention_dropout,
-            **kwargs)
+            **kwargs,
+        )
 
         self.rope = rope
 
@@ -102,7 +104,7 @@ class RotaryEmbedding2D(nn.Cell):
     def __init__(self, dim, max_h, max_w, base=10000):
         super().__init__()
         freq = mint.arange(0, dim, 2, dtype=ms.int64).float() / dim
-        inv_freq = 1.0 / (base ** freq)
+        inv_freq = 1.0 / (base**freq)
 
         grid_h = mint.arange(0, max_h)
         grid_h = grid_h.to(inv_freq.dtype)
@@ -112,13 +114,8 @@ class RotaryEmbedding2D(nn.Cell):
         grid_w = grid_w.to(inv_freq.dtype)
         grid_w = grid_w[None, :].tile((max_h, 1))
 
-        cos_h, sin_h = self._forward_one_side(grid_h, inv_freq)
-        cos_w, sin_w = self._forward_one_side(grid_w, inv_freq)
-
-        self.register_buffer("cos_h", cos_h)
-        self.register_buffer("sin_h", sin_h)
-        self.register_buffer("cos_w", cos_w)
-        self.register_buffer("sin_w", sin_w)
+        self.cos_h, self.sin_h = self._forward_one_side(grid_h, inv_freq)
+        self.cos_w, self.sin_w = self._forward_one_side(grid_w, inv_freq)
 
     def _forward_one_side(self, grid, inv_freq):
         freqs = grid[..., None] * inv_freq[None, None, :]
@@ -164,28 +161,16 @@ class SiglipVisionEmbeddings(nn.Cell):
             self.position_embedding = mint.nn.Embedding(self.num_positions, self.embed_dim)
 
     def convert_conv2d_to_linear(self, config, meta=False):
-        if meta:
-            linear_patch_embedding = mint.nn.Linear(
-                config.num_channels * self.patch_size ** 2, self.embed_dim, bias=True, device='meta'
-            )
-        else:
-            linear_patch_embedding = mint.nn.Linear(
-                config.num_channels * self.patch_size ** 2, self.embed_dim, bias=True
-            )
+        linear_patch_embedding = mint.nn.Linear(config.num_channels * self.patch_size**2, self.embed_dim, bias=True)
         W = self.patch_embedding.weight.permute(0, 2, 3, 1).reshape(
-            self.embed_dim, config.num_channels * self.patch_size ** 2
+            self.embed_dim, config.num_channels * self.patch_size**2
         )
-        linear_patch_embedding.weight.data = W
-        linear_patch_embedding.bias.data = self.patch_embedding.bias.data
+        linear_patch_embedding.weight.set_data(W)
+        linear_patch_embedding.bias.set_data(self.patch_embedding.bias)
         del self.patch_embedding
         self.patch_embedding = linear_patch_embedding
 
-    def construct(
-        self,
-        packed_pixel_values: ms.Tensor,
-        packed_flattened_position_ids: ms.Tensor
-    ) -> ms.Tensor:
-
+    def construct(self, packed_pixel_values: ms.Tensor, packed_flattened_position_ids: ms.Tensor) -> ms.Tensor:
         patch_embeds = self.patch_embedding(packed_pixel_values)
         if not self.config.rope:
             embeddings = patch_embeds + self.position_embedding(packed_flattened_position_ids)
@@ -209,8 +194,7 @@ class SiglipFlashAttention2(SiglipAttention):
         sin_w: ms.Tensor = None,
         **kwargs,
     ) -> ms.Tensor:
-
-        total_q_len, _ = hidden_states.size()
+        total_q_len, _ = hidden_states.shape
 
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
@@ -221,8 +205,8 @@ class SiglipFlashAttention2(SiglipAttention):
         value_states = value_states.view(total_q_len, self.num_heads, self.head_dim)
 
         if self.config.rope:
-            qh, qw = query_states[:, :, :self.head_dim // 2], query_states[:, :, self.head_dim // 2:]
-            kh, kw = key_states[:, :, :self.head_dim // 2], key_states[:, :, self.head_dim // 2:]
+            qh, qw = query_states[:, :, : self.head_dim // 2], query_states[:, :, self.head_dim // 2 :]
+            kh, kw = key_states[:, :, : self.head_dim // 2], key_states[:, :, self.head_dim // 2 :]
             qh, kh = apply_rotary_pos_emb(qh, kh, cos_h, sin_h)
             qw, kw = apply_rotary_pos_emb(qw, kw, cos_w, sin_w)
             query_states = mint.cat([qh, qw], dim=-1)
@@ -239,7 +223,7 @@ class SiglipFlashAttention2(SiglipAttention):
         #     causal=False,
         # )
         # TODO: double check
-        packed_attn_output = ops.flash_attention_score(
+        attn_output = ops.flash_attention_score(
             query_states.to(ms.bfloat16),
             key_states.to(ms.bfloat16),
             value_states.to(ms.bfloat16),
@@ -285,7 +269,7 @@ class SiglipEncoderLayer(nn.Cell):
         cos_h: ms.Tensor = None,
         sin_h: ms.Tensor = None,
         cos_w: ms.Tensor = None,
-        sin_w: ms.Tensor = None
+        sin_w: ms.Tensor = None,
     ) -> ms.Tensor:
         residual = hidden_states
 
@@ -297,7 +281,7 @@ class SiglipEncoderLayer(nn.Cell):
             cos_h=cos_h,
             sin_h=sin_h,
             cos_w=cos_w,
-            sin_w=sin_w
+            sin_w=sin_w,
         )
         hidden_states = residual + hidden_states
 
@@ -313,9 +297,7 @@ class SiglipEncoder(nn.Cell):
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
         self.config = config
-        self.layers = nn.CellList(
-            [SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)]
-        )
+        self.layers = nn.CellList([SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)])
 
     def construct(
         self,
@@ -327,11 +309,11 @@ class SiglipEncoder(nn.Cell):
         cos_w: ms.Tensor = None,
         sin_w: ms.Tensor = None,
     ) -> ms.Tensor:
-
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
-            hidden_states = encoder_layer(hidden_states, cu_seqlens, max_seqlen,
-                                          cos_h=cos_h, sin_h=sin_h, cos_w=cos_w, sin_w=sin_w)
+            hidden_states = encoder_layer(
+                hidden_states, cu_seqlens, max_seqlen, cos_h=cos_h, sin_h=sin_h, cos_w=cos_w, sin_w=sin_w
+            )
 
         return hidden_states
 
@@ -359,22 +341,20 @@ class SiglipVisionTransformer(nn.Cell):
         max_seqlen: int,
     ) -> ms.Tensor:
         hidden_states = self.embeddings(
-            packed_pixel_values=packed_pixel_values,
-            packed_flattened_position_ids=packed_flattened_position_ids
+            packed_pixel_values=packed_pixel_values, packed_flattened_position_ids=packed_flattened_position_ids
         )
 
         extra_inputs = {}
         if self.config.rope:
             extra_inputs.update(
-                cos_h = self.rope.cos_h[packed_flattened_position_ids],
-                sin_h = self.rope.sin_h[packed_flattened_position_ids],
-                cos_w = self.rope.cos_w[packed_flattened_position_ids],
-                sin_w = self.rope.sin_w[packed_flattened_position_ids]
+                cos_h=self.rope.cos_h[packed_flattened_position_ids],
+                sin_h=self.rope.sin_h[packed_flattened_position_ids],
+                cos_w=self.rope.cos_w[packed_flattened_position_ids],
+                sin_w=self.rope.sin_w[packed_flattened_position_ids],
             )
 
         last_hidden_state = self.encoder(
-            inputs_embeds=hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen,
-            **extra_inputs
+            inputs_embeds=hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen, **extra_inputs
         )
         last_hidden_state = self.post_layernorm(last_hidden_state)
         return last_hidden_state
@@ -402,7 +382,6 @@ class SiglipVisionModel(SiglipPreTrainedModel):
         cu_seqlens: ms.Tensor,
         max_seqlen: int,
     ) -> ms.Tensor:
-
         return self.vision_model(
             packed_pixel_values=packed_pixel_values,
             packed_flattened_position_ids=packed_flattened_position_ids,

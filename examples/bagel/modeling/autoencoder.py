@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import mindspore as ms
 import mindspore.mint as mint
 from mindspore import Tensor, nn
+
 from mindone.transformers.mindspore_adapter import scaled_dot_product_attention
 
 
@@ -55,9 +56,9 @@ class AttnBlock(nn.Cell):
 
         b, c, h, w = q.shape
         # "b c h w -> b 1 (h w) c"
-        q = q.permute(0, 2, 3, 1).reshape(b, h*w, c).unsqeeze(1).contiguous()
-        k = k.permute(0, 2, 3, 1).reshape(b, h*w, c).unsqeeze(1).contiguous()
-        v = v.permute(0, 2, 3, 1).reshape(b, h*w, c).unsqeeze(1).contiguous()
+        q = q.permute(0, 2, 3, 1).reshape(b, h * w, c).unsqueeze(1).contiguous()
+        k = k.permute(0, 2, 3, 1).reshape(b, h * w, c).unsqueeze(1).contiguous()
+        v = v.permute(0, 2, 3, 1).reshape(b, h * w, c).unsqueeze(1).contiguous()
         h_ = scaled_dot_product_attention(q, k, v)
 
         # "b 1 (h w) c -> b c h w"
@@ -65,7 +66,7 @@ class AttnBlock(nn.Cell):
 
         return h_
 
-    def forward(self, x: Tensor) -> Tensor:
+    def construct(self, x: Tensor) -> Tensor:
         return x + self.proj_out(self.attention(x))
 
 
@@ -83,7 +84,7 @@ class ResnetBlock(nn.Cell):
         if self.in_channels != self.out_channels:
             self.nin_shortcut = mint.nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
 
-    def forward(self, x):
+    def construct(self, x):
         h = x
         h = self.norm1(h)
         h = swish(h)
@@ -105,7 +106,7 @@ class Downsample(nn.Cell):
         # no asymmetric padding in torch conv, must do it ourselves
         self.conv = mint.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=0)
 
-    def forward(self, x: Tensor):
+    def construct(self, x: Tensor):
         pad = (0, 1, 0, 1)
         x = mint.nn.functional.pad(x, pad, mode="constant", value=0)
         x = self.conv(x)
@@ -117,7 +118,7 @@ class Upsample(nn.Cell):
         super().__init__()
         self.conv = mint.nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1)
 
-    def forward(self, x: Tensor):
+    def construct(self, x: Tensor):
         x = mint.nn.functional.interpolate(x, scale_factor=2.0, mode="nearest")
         x = self.conv(x)
         return x
@@ -173,7 +174,7 @@ class Encoder(nn.Cell):
         self.norm_out = mint.nn.GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True)
         self.conv_out = mint.nn.Conv2d(block_in, 2 * z_channels, kernel_size=3, stride=1, padding=1)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def construct(self, x: Tensor) -> Tensor:
         # downsampling
         hs = [self.conv_in(x)]
         for i_level in range(self.num_resolutions):
@@ -251,7 +252,7 @@ class Decoder(nn.Cell):
         self.norm_out = mint.nn.GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True)
         self.conv_out = mint.nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
 
-    def forward(self, z: Tensor) -> Tensor:
+    def construct(self, z: Tensor) -> Tensor:
         # z to block_in
         h = self.conv_in(z)
 
@@ -282,7 +283,7 @@ class DiagonalGaussian(nn.Cell):
         self.sample = sample
         self.chunk_dim = chunk_dim
 
-    def forward(self, z: Tensor) -> Tensor:
+    def construct(self, z: Tensor) -> Tensor:
         mean, logvar = mint.chunk(z, 2, dim=self.chunk_dim)
         if self.sample:
             std = mint.exp(0.5 * logvar)
@@ -325,7 +326,7 @@ class AutoEncoder(nn.Cell):
         z = z / self.scale_factor + self.shift_factor
         return self.decoder(z)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def construct(self, x: Tensor) -> Tensor:
         return self.decode(self.encode(x))
 
 
@@ -342,23 +343,23 @@ def print_load_warning(missing: list[str], unexpected: list[str]) -> None:
 
 def load_ae(local_path: str) -> AutoEncoder:
     ae_params = AutoEncoderParams(
-            resolution=256,
-            in_channels=3,
-            downsample=8,
-            ch=128,
-            out_ch=3,
-            ch_mult=[1, 2, 4, 4],
-            num_res_blocks=2,
-            z_channels=16,
-            scale_factor=0.3611,
-            shift_factor=0.1159,
+        resolution=256,
+        in_channels=3,
+        downsample=8,
+        ch=128,
+        out_ch=3,
+        ch_mult=[1, 2, 4, 4],
+        num_res_blocks=2,
+        z_channels=16,
+        scale_factor=0.3611,
+        shift_factor=0.1159,
     )
 
     # Loading the autoencoder
     ae = AutoEncoder(ae_params)
 
     if local_path is not None:
-        state_dict = ms.load_checkpoint(local_path)
+        state_dict = ms.load_checkpoint(local_path, format="safetensors")
 
         model_state_dict = {k: v for k, v in ae.parameters_and_names()}
         loaded_keys = list(state_dict.keys())
@@ -378,12 +379,12 @@ def load_ae(local_path: str) -> AutoEncoder:
                 )
 
         # print(
-        #     f"Loading BagelLVAE...\nmissing_keys: {missing_keys}, \nunexpected_keys: {unexpected_keys}, \nmismatched_keys: {mismatched_keys}"
+        #     f"Loading BagelAE...\nmissing_keys: {missing_keys}, \nunexpected_keys: {unexpected_keys}, \nmismatched_keys: {mismatched_keys}"
         # )
         print_load_warning(missing_keys, unexpected_keys)
-        print(f"state_dict.dtype {state_dict[loaded_keys[0]].dtype}")  #
+        print(f"AE state_dict.dtype {state_dict[loaded_keys[0]].dtype}")  #
         # Instantiate the model
         param_not_load, ckpt_not_load = ms.load_param_into_net(ae, state_dict, strict_load=False)
-        print(f"Loaded checkpoint: param_not_load {param_not_load}, ckpt_not_load {ckpt_not_load}")
+        print(f"Loaded AE checkpoint: param_not_load {param_not_load}, ckpt_not_load {ckpt_not_load}")
 
     return ae, ae_params

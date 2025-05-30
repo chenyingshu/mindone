@@ -11,16 +11,15 @@ from shutil import copyfile
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import sentencepiece as spm
-
 from transformers.convert_slow_tokenizer import import_protobuf
+
 from mindone.transformers.tokenization_utils import PreTrainedTokenizer
 from mindone.transformers.tokenization_utils_base import AddedToken
 
-
 if TYPE_CHECKING:
     from mindone.transformers.tokenization_utils_base import TextInput
-from mindone.transformers.utils import logging, requires_backends
 
+from mindone.transformers.utils import logging, requires_backends
 
 logger = logging.get_logger(__name__)
 
@@ -258,7 +257,8 @@ class SiglipTokenizer(PreTrainedTokenizer):
     def remove_punctuation(self, text: str) -> str:
         return text.translate(str.maketrans("", "", string.punctuation))
 
-    # source: https://github.com/google-research/big_vision/blob/3b8e5ab6ad4f96e32b32826f9e1b8fd277914f9c/big_vision/evaluators/proj/image_text/prompt_engineering.py#L94
+    # source:
+    # https://github.com/google-research/big_vision/blob/3b8e5ab6ad4f96e32b32826f9e1b8fd277914f9c/big_vision/evaluators/proj/image_text/prompt_engineering.py#L94
     def canonicalize_text(self, text, *, keep_punctuation_exact_string=None):
         """Returns canonicalized `text` (puncuation removed).
 

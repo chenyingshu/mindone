@@ -2,38 +2,37 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from copy import deepcopy
-from typing import List, Dict, Optional, Union, Any
-
-from PIL import Image
-import mindspore as ms
-from mindspore import mint, ops
+from typing import Any, Dict, List, Optional, Union
 
 from data.data_utils import pil_img2rgb
 from modeling.bagel.qwen2_navit import NaiveCache
 from modeling.ms_utils import no_grad
+from PIL import Image
 
+import mindspore as ms
+from mindspore import mint, ops
 
-VLM_THINK_SYSTEM_PROMPT = '''You should first think about the reasoning process in the mind and then provide the user with the answer. 
-The reasoning process is enclosed within <think> </think> tags, i.e. <think> reasoning process here </think> answer here'''
+VLM_THINK_SYSTEM_PROMPT = """You should first think about the reasoning process in the mind and then provide the user with the answer.
+The reasoning process is enclosed within <think> </think> tags, i.e. <think> reasoning process here </think> answer here"""
 
-GEN_THINK_SYSTEM_PROMPT = '''You should first think about the planning process in the mind and then generate the image. 
-The planning process is enclosed within <think> </think> tags, i.e. <think> planning process here </think> image here'''
+GEN_THINK_SYSTEM_PROMPT = """You should first think about the planning process in the mind and then generate the image.
+The planning process is enclosed within <think> </think> tags, i.e. <think> planning process here </think> image here"""
 
 
 class InterleaveInferencer:
     def __init__(self, model, vae_model, tokenizer, vae_transform, vit_transform, new_token_ids):
-        self.model = model # Bagel
-        self.vae_model = vae_model # AutoEncoder
-        self.tokenizer = tokenizer # Qwen2Tokenizer
+        self.model = model  # Bagel
+        self.vae_model = vae_model  # AutoEncoder
+        self.tokenizer = tokenizer  # Qwen2Tokenizer
         self.vae_transform = vae_transform
         self.vit_transform = vit_transform
         self.new_token_ids = new_token_ids
 
     def init_gen_context(self):
         gen_context = {
-            'kv_lens': [0],
-            'ropes': [0],
-            'past_key_values': NaiveCache(self.model.config.llm_config.num_hidden_layers),
+            "kv_lens": [0],
+            "ropes": [0],
+            "past_key_values": NaiveCache(self.model.config.llm_config.num_hidden_layers),
         }
         return gen_context
 
@@ -41,9 +40,9 @@ class InterleaveInferencer:
     def update_context_text(self, text, gen_context):
         # used for interleave data, currently only support 1 data inference,
         with no_grad():
-            past_key_values = gen_context['past_key_values']
-            kv_lens = gen_context['kv_lens']
-            ropes = gen_context['ropes']
+            past_key_values = gen_context["past_key_values"]
+            kv_lens = gen_context["kv_lens"]
+            ropes = gen_context["ropes"]
             generation_input, kv_lens, ropes = ops.stop_gradient(
                 self.model.prepare_prompts(
                     curr_kvlens=kv_lens,
@@ -55,9 +54,9 @@ class InterleaveInferencer:
             )
 
             past_key_values = self.model.forward_cache_update_text(past_key_values, **generation_input)
-            gen_context['kv_lens'] = kv_lens
-            gen_context['ropes'] = ropes
-            gen_context['past_key_values'] = past_key_values
+            gen_context["kv_lens"] = kv_lens
+            gen_context["ropes"] = ropes
+            gen_context["past_key_values"] = past_key_values
 
         return gen_context
 
@@ -66,13 +65,13 @@ class InterleaveInferencer:
         # used for interleave data, currently only support 1 data inference,
 
         assert vae or vit
-        past_key_values = gen_context['past_key_values']
-        kv_lens = gen_context['kv_lens']
-        ropes =  gen_context['ropes']
+        past_key_values = gen_context["past_key_values"]
+        kv_lens = gen_context["kv_lens"]
+        ropes = gen_context["ropes"]
 
         with no_grad():
             if vae:
-                ## update vae
+                # update vae
                 generation_input, kv_lens, ropes = ops.stop_gradient(
                     self.model.prepare_vae_images(
                         curr_kvlens=kv_lens,
@@ -82,10 +81,12 @@ class InterleaveInferencer:
                         new_token_ids=self.new_token_ids,
                     )
                 )
-                past_key_values = self.model.forward_cache_update_vae(self.vae_model, past_key_values, **generation_input)
+                past_key_values = self.model.forward_cache_update_vae(
+                    self.vae_model, past_key_values, **generation_input
+                )
 
             if vit:
-                ## update vit
+                # update vit
                 generation_input, kv_lens, ropes = ops.stop_gradient(
                     self.model.prepare_vit_images(
                         curr_kvlens=kv_lens,
@@ -97,9 +98,9 @@ class InterleaveInferencer:
                 )
                 past_key_values = self.model.forward_cache_update_vit(past_key_values, **generation_input)
 
-        gen_context['kv_lens'] = kv_lens
-        gen_context['ropes'] = ropes
-        gen_context['past_key_values'] = past_key_values
+        gen_context["kv_lens"] = kv_lens
+        gen_context["ropes"] = ropes
+        gen_context["past_key_values"] = past_key_values
 
         return gen_context
 
@@ -110,21 +111,19 @@ class InterleaveInferencer:
         gen_context,
         cfg_text_scale=4.0,
         cfg_img_scale=1.5,
-
         cfg_text_precontext=None,
         cfg_img_precontext=None,
         cfg_interval=(0.4, 1.0),
         cfg_renorm_min=0.0,
         cfg_renorm_type="global",
-
         num_timesteps=50,
-        timestep_shift=3.0
+        timestep_shift=3.0,
     ):
         with no_grad():
             # print(cfg_renorm_type)
-            past_key_values = gen_context['past_key_values']
-            kv_lens = gen_context['kv_lens']
-            ropes = gen_context['ropes']
+            past_key_values = gen_context["past_key_values"]
+            kv_lens = gen_context["kv_lens"]
+            ropes = gen_context["ropes"]
             generation_input = ops.stop_gradient(
                 self.model.prepare_vae_latent(
                     curr_kvlens=kv_lens,
@@ -135,9 +134,9 @@ class InterleaveInferencer:
             )
 
             # text cfg
-            cfg_text_past_key_values = cfg_text_precontext['past_key_values']
-            kv_lens_cfg = cfg_text_precontext['kv_lens']
-            ropes_cfg = cfg_text_precontext['ropes']
+            cfg_text_past_key_values = cfg_text_precontext["past_key_values"]
+            kv_lens_cfg = cfg_text_precontext["kv_lens"]
+            ropes_cfg = cfg_text_precontext["ropes"]
             generation_input_cfg_text = ops.stop_gradient(
                 self.model.prepare_vae_latent_cfg(
                     curr_kvlens=kv_lens_cfg,
@@ -147,9 +146,9 @@ class InterleaveInferencer:
             )
 
             # img cfg
-            cfg_img_past_key_values = cfg_img_precontext['past_key_values']
-            kv_lens_cfg = cfg_img_precontext['kv_lens']
-            ropes_cfg = cfg_img_precontext['ropes']
+            cfg_img_past_key_values = cfg_img_precontext["past_key_values"]
+            kv_lens_cfg = cfg_img_precontext["kv_lens"]
+            ropes_cfg = cfg_img_precontext["ropes"]
             generation_input_cfg_img = ops.stop_gradient(
                 self.model.prepare_vae_latent_cfg(
                     curr_kvlens=kv_lens_cfg,
@@ -170,30 +169,33 @@ class InterleaveInferencer:
                 cfg_renorm_type=cfg_renorm_type,
                 timestep_shift=timestep_shift,
                 **generation_input,
-                cfg_text_packed_position_ids=generation_input_cfg_text['cfg_packed_position_ids'],
-                cfg_text_packed_query_indexes=generation_input_cfg_text['cfg_packed_query_indexes'],
-                cfg_text_key_values_lens=generation_input_cfg_text['cfg_key_values_lens'],
-                cfg_text_packed_key_value_indexes=generation_input_cfg_text['cfg_packed_key_value_indexes'],
-                cfg_img_packed_position_ids=generation_input_cfg_img['cfg_packed_position_ids'],
-                cfg_img_packed_query_indexes=generation_input_cfg_img['cfg_packed_query_indexes'],
-                cfg_img_key_values_lens=generation_input_cfg_img['cfg_key_values_lens'],
-                cfg_img_packed_key_value_indexes=generation_input_cfg_img['cfg_packed_key_value_indexes'],
+                cfg_text_packed_position_ids=generation_input_cfg_text["cfg_packed_position_ids"],
+                cfg_text_packed_query_indexes=generation_input_cfg_text["cfg_packed_query_indexes"],
+                cfg_text_key_values_lens=generation_input_cfg_text["cfg_key_values_lens"],
+                cfg_text_packed_key_value_indexes=generation_input_cfg_text["cfg_packed_key_value_indexes"],
+                cfg_img_packed_position_ids=generation_input_cfg_img["cfg_packed_position_ids"],
+                cfg_img_packed_query_indexes=generation_input_cfg_img["cfg_packed_query_indexes"],
+                cfg_img_key_values_lens=generation_input_cfg_img["cfg_key_values_lens"],
+                cfg_img_packed_key_value_indexes=generation_input_cfg_img["cfg_packed_key_value_indexes"],
             )
 
             image = ops.stop_gradient(self.decode_image(unpacked_latent[0], image_shape))
         return image
 
-
     def decode_image(self, latent, image_shape):
         H, W = image_shape
         h, w = H // self.model.latent_downsample, W // self.model.latent_downsample
 
-        latent = latent.reshape(1, h, w, self.model.latent_patch_size, self.model.latent_patch_size, self.model.latent_channel)
+        latent = latent.reshape(
+            1, h, w, self.model.latent_patch_size, self.model.latent_patch_size, self.model.latent_channel
+        )
         latent = mint.einsum("nhwpqc->nchpwq", latent)
-        latent = latent.reshape(1, self.model.latent_channel, h * self.model.latent_patch_size, w * self.model.latent_patch_size)
-        image = self.vae_model.decode(latent)
+        latent = latent.reshape(
+            1, self.model.latent_channel, h * self.model.latent_patch_size, w * self.model.latent_patch_size
+        )
+        image = self.vae_model.decode(latent.float())
         image = (image * 0.5 + 0.5).clamp(0, 1)[0].permute(1, 2, 0) * 255
-        image = Image.fromarray((image).to(ms.uint8).cpu().numpy())
+        image = Image.fromarray((image).to(ms.uint8).asnumpy())
 
         return image
 
@@ -201,9 +203,9 @@ class InterleaveInferencer:
     def gen_text(self, gen_context, max_length: int = 500, do_sample: bool = True, temperature: float = 1.0):
         with no_grad():
             gen_context = deepcopy(gen_context)
-            past_key_values = gen_context['past_key_values']
-            kv_lens = gen_context['kv_lens']
-            ropes = gen_context['ropes']
+            past_key_values = gen_context["past_key_values"]
+            kv_lens = gen_context["kv_lens"]
+            ropes = gen_context["ropes"]
 
             generation_input = ops.stop_gradient(self.model.prepare_start_tokens(kv_lens, ropes, self.new_token_ids))
             unpacked_latent = self.model.generate_text(
@@ -211,11 +213,11 @@ class InterleaveInferencer:
                 max_length=max_length,
                 do_sample=do_sample,
                 temperature=temperature,
-                end_token_id=self.new_token_ids['eos_token_id'],
+                end_token_id=self.new_token_ids["eos_token_id"],
                 **generation_input,
             )
-            output = ops.stop_gradient(self.tokenizer.decode(unpacked_latent[:,0]))
-            output = output.split('<|im_end|>')[0].split('<|im_start|>')[1]
+            output = ops.stop_gradient(self.tokenizer.decode(unpacked_latent[:, 0]))
+            output = output.split("<|im_end|>")[0].split("<|im_start|>")[1]
         return output
 
     # no_grad()
@@ -224,7 +226,6 @@ class InterleaveInferencer:
         input_lists: List[Union[str, Image.Image]],
         think=False,
         understanding_output=False,
-
         max_think_token_n=1000,
         do_sample=False,
         text_temperature=0.3,
@@ -268,12 +269,16 @@ class InterleaveInferencer:
                     raise ValueError(f"Unsupported input type: {type(input_term)}")
 
             if understanding_output:
-                gen_text = self.gen_text(gen_context, do_sample=do_sample, temperature=text_temperature, max_length=max_think_token_n)
+                gen_text = self.gen_text(
+                    gen_context, do_sample=do_sample, temperature=text_temperature, max_length=max_think_token_n
+                )
                 output_list.append(gen_text)
 
             else:
                 if think:
-                    gen_text = self.gen_text(gen_context, do_sample=do_sample, temperature=text_temperature, max_length=max_think_token_n)
+                    gen_text = self.gen_text(
+                        gen_context, do_sample=do_sample, temperature=text_temperature, max_length=max_think_token_n
+                    )
                     gen_context = self.update_context_text(gen_text, gen_context)
                     output_list.append(gen_text)
 
@@ -282,7 +287,6 @@ class InterleaveInferencer:
                     gen_context,
                     cfg_text_precontext=cfg_text_context,
                     cfg_img_precontext=cfg_img_context,
-
                     cfg_text_scale=cfg_text_scale,
                     cfg_img_scale=cfg_img_scale,
                     cfg_interval=cfg_interval,
@@ -296,16 +300,11 @@ class InterleaveInferencer:
 
         return output_list
 
-    def __call__(
-        self,
-        image: Optional[Image.Image] = None,
-        text: Optional[str] = None,
-        **kargs
-    ) -> Dict[str, Any]:
-        output_dict = {'image': None, 'text': None}
+    def __call__(self, image: Optional[Image.Image] = None, text: Optional[str] = None, **kargs) -> Dict[str, Any]:
+        output_dict = {"image": None, "text": None}
 
         if image is None and text is None:
-            print('Please provide at least one input: either an image or text.')
+            print("Please provide at least one input: either an image or text.")
             return output_dict
 
         input_list = []
@@ -318,7 +317,7 @@ class InterleaveInferencer:
 
         for i in output_list:
             if isinstance(i, Image.Image):
-                output_dict['image'] = i
+                output_dict["image"] = i
             elif isinstance(i, str):
-                output_dict['text'] = i
+                output_dict["text"] = i
         return output_dict

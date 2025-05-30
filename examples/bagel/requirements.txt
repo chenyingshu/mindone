@@ -9,3 +9,4 @@ safetensors==0.4.5
 scipy==1.10.1
 sentencepiece==0.1.99
 transformers==4.49.0
+omegaconf

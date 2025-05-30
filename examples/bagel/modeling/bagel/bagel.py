@@ -2,16 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
-from typing import List, Tuple, Optional
-
-from PIL import Image
-import mindspore as ms
-from mindspore import mint, ops
-import mindspore.mint.nn.functional as F
-from mindspore import nn
-from transformers.configuration_utils import PretrainedConfig
-from mindone.transformers.modeling_utils import PreTrainedModel
-from ..ms_utils import no_grad
+from typing import List, Optional, Tuple
 
 from data.data_utils import (
     create_sparse_mask,
@@ -19,15 +10,26 @@ from data.data_utils import (
     get_flattened_position_ids_interpolate,
     patchify,
 )
-from .qwen2_navit import NaiveCache
-from .modeling_utils import MLPconnector, TimestepEmbedder, PositionEmbedding
+from PIL import Image
+from transformers.configuration_utils import PretrainedConfig
+
+import mindspore as ms
+import mindspore.mint.nn.functional as F
+from mindspore import mint, ops
 from mindspore.common.initializer import initializer
+
+from mindone.transformers.modeling_utils import PreTrainedModel
+
+from ..ms_utils import no_grad
+from .modeling_utils import MLPconnector, PositionEmbedding, TimestepEmbedder
+from .qwen2_navit import NaiveCache
 
 # Copied from torch.nn.attention.flex_attention.create_block_mask
 # from torch.nn.attention.flex_attention import create_block_mask
 # from typing import Union, Callable
 # from data.data_utils import _mask_mod_signature
 # _DEFAULT_SPARSE_BLOCK_SIZE = 128
+
 
 class BagelConfig(PretrainedConfig):
     def __init__(
@@ -40,10 +42,10 @@ class BagelConfig(PretrainedConfig):
         latent_patch_size=2,
         max_latent_size=32,
         vit_max_num_patch_per_side=70,
-        connector_act="gelu_mindspore_tanh",
+        connector_act="gelu_pytorch_tanh",
         interpolate_pos=False,
         timestep_shift=1.0,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(**kwargs)
         self.visual_gen = visual_gen
@@ -61,7 +63,7 @@ class BagelConfig(PretrainedConfig):
 
 class Bagel(PreTrainedModel):
     config_class = BagelConfig
-    base_model_prefix = 'bagel'
+    base_model_prefix = "bagel"
 
     def __init__(self, language_model, vit_model, config: BagelConfig):
         super().__init__(config)
@@ -76,7 +78,7 @@ class Bagel(PreTrainedModel):
             self.latent_downsample = config.vae_config.downsample * config.latent_patch_size
             self.max_latent_size = config.max_latent_size
             self.latent_channel = config.vae_config.z_channels
-            self.patch_latent_dim = self.latent_patch_size ** 2 * self.latent_channel
+            self.patch_latent_dim = self.latent_patch_size**2 * self.latent_channel
             self.time_embedder = TimestepEmbedder(self.hidden_size)
             self.vae2llm = mint.nn.Linear(self.patch_latent_dim, self.hidden_size)
             self.llm2vae = mint.nn.Linear(self.hidden_size, self.patch_latent_dim)
@@ -100,9 +102,9 @@ class Bagel(PreTrainedModel):
 
     def _init_weights(self):
         if self.config.visual_gen:
-            weight = initializer("zeros", weight.shape, weight.dtype)
+            weight = initializer("zeros", self.llm2vae.weight.shape, self.llm2vae.weight.dtype)
             self.llm2vae.weight.set_data(weight)
-            bias = initializer("zeros", bias.shape, bias.dtype)
+            bias = initializer("zeros", self.llm2vae.bias.shape, self.llm2vae.bias.dtype)
             self.llm2vae.bias.set_data(bias)
 
     def construct(
@@ -136,7 +138,7 @@ class Bagel(PreTrainedModel):
             packed_text_ids: 1-D int tensor, packed text token ids.
             packed_text_indexes: 1-D int tensor, packed text token indexes in sequence.
             sample_lens: A list of N ints, length of each sample in packed_sequence.
-            nested_attention_masks: A list of N 2-D float tensor,  where 0.0 means attention and 
+            nested_attention_masks: A list of N 2-D float tensor,  where 0.0 means attention and
                 -inf means ignore.
             packed_position_ids: packed 1-D positions, an image has only one global position shared
                 by all latent tokens.
@@ -189,14 +191,16 @@ class Bagel(PreTrainedModel):
             p = self.latent_patch_size
             packed_latent = []
             for latent, (h, w) in zip(padded_latent, patchified_vae_latent_shapes):
-                latent = latent[:, :h * p, :w * p].reshape(self.latent_channel, h, p, w, p)
+                latent = latent[:, : h * p, : w * p].reshape(self.latent_channel, h, p, w, p)
                 latent = mint.einsum("chpwq->hwpqc", latent).reshape(-1, p * p * self.latent_channel)
                 packed_latent.append(latent)
             packed_latent_clean = mint.cat(packed_latent, dim=0)
 
             noise = mint.randn_like(packed_latent_clean)
             packed_timesteps = mint.sigmoid(packed_timesteps)
-            packed_timesteps = self.timestep_shift * packed_timesteps / (1 + (self.timestep_shift - 1) * packed_timesteps)
+            packed_timesteps = (
+                self.timestep_shift * packed_timesteps / (1 + (self.timestep_shift - 1) * packed_timesteps)
+            )
             packed_latent = (1 - packed_timesteps[:, None]) * packed_latent_clean + packed_timesteps[:, None] * noise
             packed_timestep_embeds = self.time_embedder(packed_timesteps)
             latent_token_pos_emb = self.latent_pos_embed(packed_latent_position_ids)
@@ -207,7 +211,7 @@ class Bagel(PreTrainedModel):
         if self.use_moe:
             packed_und_token_indexes = packed_text_indexes
             if packed_vit_token_indexes is not None:
-                packed_und_token_indexes=mint.cat([packed_text_indexes, packed_vit_token_indexes], dim=0)
+                packed_und_token_indexes = mint.cat([packed_text_indexes, packed_vit_token_indexes], dim=0)
             extra_inputs.update(
                 packed_und_token_indexes=packed_und_token_indexes,
                 packed_gen_token_indexes=packed_vae_token_indexes,
@@ -224,7 +228,7 @@ class Bagel(PreTrainedModel):
         mse = None
         if self.config.visual_gen:
             packed_mse_preds = self.llm2vae(last_hidden_state[mse_loss_indexes])
-            target = noise - packed_latent_clean # NOTE: v_t=dx_t/dt=x_1-x_0, pointing from data to noise
+            target = noise - packed_latent_clean  # NOTE: v_t=dx_t/dt=x_1-x_0, pointing from data to noise
             has_mse = packed_timesteps > 0
             mse = (packed_mse_preds - target[has_mse]) ** 2
 
@@ -234,7 +238,6 @@ class Bagel(PreTrainedModel):
             ce = mint.nn.CrossEntropyLoss(reduction="none")(packed_ce_preds, packed_label_ids)
 
         return dict(mse=mse, ce=ce)
-
 
     def prepare_prompts(self, curr_kvlens, curr_rope, prompts, tokenizer, new_token_ids):
         packed_text_ids = list()
@@ -250,7 +253,7 @@ class Bagel(PreTrainedModel):
             curr += curr_kvlen
 
             text_ids = tokenizer.encode(prompt)
-            text_ids = [new_token_ids['bos_token_id']] + text_ids + [new_token_ids['eos_token_id']]
+            text_ids = [new_token_ids["bos_token_id"]] + text_ids + [new_token_ids["eos_token_id"]]
             text_token_lens.append(len(text_ids))
             packed_text_ids.extend(text_ids)
             packed_text_position_ids.extend(range(curr_position_id, curr_position_id + len(text_ids)))
@@ -302,7 +305,7 @@ class Bagel(PreTrainedModel):
                     **extra_inputs,
                 )
             )
-            past_key_values = output.past_key_values
+            past_key_values = output["past_key_values"]
 
         return past_key_values
 
@@ -319,7 +322,7 @@ class Bagel(PreTrainedModel):
             packed_key_value_indexes.extend(range(curr, curr + curr_kvlen))
             curr += curr_kvlen
 
-            packed_text_ids.append(new_token_ids['start_of_image'])
+            packed_text_ids.append(new_token_ids["start_of_image"])
             packed_text_indexes.append(_curr)
             packed_indexes.append(curr)
             curr += 1
@@ -327,11 +330,12 @@ class Bagel(PreTrainedModel):
 
             image_tensor = transforms(image)
             vit_position_ids = self.get_flattened_position_ids(
-                image_tensor.shape[1], image_tensor.shape[2],
+                image_tensor.shape[1],
+                image_tensor.shape[2],
                 self.vit_patch_size,
-                max_num_patches_per_side=self.vit_max_num_patch_per_side
+                max_num_patches_per_side=self.vit_max_num_patch_per_side,
             )
-            vit_tokens = patchify(image_tensor, self.vit_patch_size)
+            vit_tokens = patchify(image_tensor, self.vit_patch_size).to(ms.bfloat16)
             packed_vit_tokens.append(vit_tokens)
             num_img_tokens = vit_tokens.shape[0]
             packed_vit_position_ids.append(vit_position_ids)
@@ -341,7 +345,7 @@ class Bagel(PreTrainedModel):
             curr += num_img_tokens
             _curr += num_img_tokens
 
-            packed_text_ids.append(new_token_ids['end_of_image'])
+            packed_text_ids.append(new_token_ids["end_of_image"])
             packed_text_indexes.append(_curr)
             packed_indexes.append(curr)
             curr += 1
@@ -386,7 +390,7 @@ class Bagel(PreTrainedModel):
     ):
         with no_grad():
             packed_text_embedding = ops.stop_gradient(self.language_model.model.embed_tokens(packed_text_ids))
-            packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
+            packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens).item(), self.hidden_size))
             packed_sequence[packed_text_indexes] = packed_text_embedding
 
             cu_seqlens = F.pad(mint.cumsum(vit_token_seqlens, dim=0), (1, 0))
@@ -394,7 +398,7 @@ class Bagel(PreTrainedModel):
             max_seqlen = mint.max(vit_token_seqlens).item()
             packed_vit_token_embed = ops.stop_gradient(
                 self.vit_model(
-                    packed_pixel_values=packed_vit_tokens,
+                    packed_pixel_values=packed_vit_tokens.to(ms.bfloat16),
                     packed_flattened_position_ids=packed_vit_position_ids,
                     cu_seqlens=cu_seqlens,
                     max_seqlen=max_seqlen,
@@ -423,7 +427,7 @@ class Bagel(PreTrainedModel):
                     **extra_inputs,
                 )
             )
-            past_key_values = output.past_key_values
+            past_key_values = output["past_key_values"]
 
         return past_key_values
 
@@ -441,18 +445,19 @@ class Bagel(PreTrainedModel):
             packed_key_value_indexes.extend(range(curr, curr + curr_kvlen))
             curr += curr_kvlen
 
-            packed_text_ids.append(new_token_ids['start_of_image'])
+            packed_text_ids.append(new_token_ids["start_of_image"])
             packed_text_indexes.append(_curr)
             packed_indexes.append(curr)
             curr += 1
             _curr += 1
 
-            image_tensor = transforms(image) # CHW
+            image_tensor = transforms(image)  # CHW
             vae_image_tensors.append(image_tensor)
             vae_posiiton_ids = self.get_flattened_position_ids(
-                image_tensor.shape[1], image_tensor.shape[2],
+                image_tensor.shape[1],
+                image_tensor.shape[2],
                 self.latent_downsample,
-                max_num_patches_per_side=self.max_latent_size
+                max_num_patches_per_side=self.max_latent_size,
             )
             packed_vae_position_ids.append(vae_posiiton_ids)
             H, W = image_tensor.shape[1:]
@@ -466,7 +471,7 @@ class Bagel(PreTrainedModel):
             curr += num_img_tokens
             _curr += num_img_tokens
 
-            packed_text_ids.append(new_token_ids['end_of_image'])
+            packed_text_ids.append(new_token_ids["end_of_image"])
             packed_text_indexes.append(_curr)
             packed_indexes.append(curr)
             curr += 1
@@ -481,7 +486,7 @@ class Bagel(PreTrainedModel):
         max_image_size = [max(item) for item in list(zip(*image_sizes))]
         padded_images = mint.zeros(size=(len(vae_image_tensors), *max_image_size), dtype=image_tensor.dtype)
         for i, image_tensor in enumerate(vae_image_tensors):
-            padded_images[i, :, :image_tensor.shape[1], :image_tensor.shape[2]] = image_tensor
+            padded_images[i, :, : image_tensor.shape[1], : image_tensor.shape[2]] = image_tensor
 
         generation_input = {
             "padded_images": padded_images,
@@ -519,18 +524,16 @@ class Bagel(PreTrainedModel):
         packed_key_value_indexes: ms.Tensor,
     ):
         with no_grad():
-            packed_text_embedding = ops.stop_gradient(
-                self.language_model.model.embed_tokens(packed_text_ids)
-            )
-            packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
+            packed_text_embedding = ops.stop_gradient(self.language_model.model.embed_tokens(packed_text_ids))
+            packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens).item(), self.hidden_size))
             packed_sequence[packed_text_indexes] = packed_text_embedding
 
-            padded_latent = ops.stop_gradient(vae_model.encode(padded_images))
+            padded_latent = ops.stop_gradient(vae_model.encode(padded_images)).to(ms.bfloat16)
 
             p = self.latent_patch_size
             packed_latent = list()
             for latent, (h, w) in zip(padded_latent, patchified_vae_latent_shapes):
-                latent = latent[:, :h * p, :w * p].reshape(self.latent_channel, h, p, w, p)
+                latent = latent[:, : h * p, : w * p].reshape(self.latent_channel, h, p, w, p)
                 latent = mint.einsum("chpwq->hwpqc", latent).reshape(-1, p * p * self.latent_channel)
                 packed_latent.append(latent)
             packed_latent = mint.cat(packed_latent, dim=0)
@@ -544,7 +547,7 @@ class Bagel(PreTrainedModel):
                 extra_inputs = {
                     "mode": "gen",
                     "packed_vae_token_indexes": packed_vae_token_indexes,
-                    "packed_text_indexes": packed_text_indexes
+                    "packed_text_indexes": packed_text_indexes,
                 }
 
             output = ops.stop_gradient(
@@ -561,7 +564,7 @@ class Bagel(PreTrainedModel):
                     **extra_inputs,
                 )
             )
-            past_key_values = output.past_key_values
+            past_key_values = output["past_key_values"]
 
         return past_key_values
 
@@ -576,30 +579,26 @@ class Bagel(PreTrainedModel):
             packed_key_value_indexes.extend(range(curr, curr + curr_kvlen))
             curr += curr_kvlen
 
-            packed_text_ids.append(new_token_ids['start_of_image'])
+            packed_text_ids.append(new_token_ids["start_of_image"])
             packed_text_indexes.append(query_curr)
             packed_indexes.append(curr)
             curr += 1
             query_curr += 1
 
             vae_posiiton_ids = self.get_flattened_position_ids(
-                H, W,
-                self.latent_downsample,
-                max_num_patches_per_side=self.max_latent_size
+                H, W, self.latent_downsample, max_num_patches_per_side=self.max_latent_size
             )
             packed_vae_position_ids.append(vae_posiiton_ids)
 
             h, w = H // self.latent_downsample, W // self.latent_downsample
             num_image_tokens = h * w
-            packed_init_noises.append(
-                mint.randn(num_image_tokens, self.latent_channel * self.latent_patch_size ** 2)
-            )
+            packed_init_noises.append(mint.randn(num_image_tokens, self.latent_channel * self.latent_patch_size**2))
             packed_vae_token_indexes.extend(range(query_curr, query_curr + num_image_tokens))
             packed_indexes.extend(range(curr, curr + num_image_tokens))
             curr += num_image_tokens
             query_curr += num_image_tokens
 
-            packed_text_ids.append(new_token_ids['end_of_image'])
+            packed_text_ids.append(new_token_ids["end_of_image"])
             packed_text_indexes.append(query_curr)
             packed_indexes.append(curr)
             curr += 1
@@ -692,15 +691,14 @@ class Bagel(PreTrainedModel):
         cfg_type: str = "parallel",
     ):
         with no_grad():
-            x_t = packed_init_noises
+            x_t = packed_init_noises.to(ms.bfloat16)
 
             timesteps = mint.linspace(1, 0, num_timesteps)
             timesteps = timestep_shift * timesteps / (1 + (timestep_shift - 1) * timesteps)
-            dts =  timesteps[:-1] - timesteps[1:]
+            dts = timesteps[:-1] - timesteps[1:]
             timesteps = timesteps[:-1]
 
             for i, t in enumerate(timesteps):
-
                 timestep = ms.tensor([t] * x_t.shape[0])
                 if t > cfg_interval[0] and t <= cfg_interval[1]:
                     cfg_text_scale_ = cfg_text_scale
@@ -740,7 +738,7 @@ class Bagel(PreTrainedModel):
                     cfg_type=cfg_type,
                 )
 
-                x_t = x_t - v_t * dts[i] # velocity pointing from data to noise
+                x_t = x_t - v_t * dts[i].to(ms.bfloat16)  # velocity pointing from data to noise
 
             unpacked_latent = x_t.split((packed_seqlens - 2).tolist())
         return unpacked_latent
@@ -780,7 +778,7 @@ class Bagel(PreTrainedModel):
     ):
         with no_grad():
             packed_text_embedding = ops.stop_gradient(self.language_model.model.embed_tokens(packed_text_ids))
-            packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens), self.hidden_size))
+            packed_sequence = packed_text_embedding.new_zeros((sum(packed_seqlens).item(), self.hidden_size))
             packed_sequence[packed_text_indexes] = packed_text_embedding
 
             assert timestep.unique().shape[0] == 1
@@ -794,7 +792,7 @@ class Bagel(PreTrainedModel):
                 extra_inputs = {
                     "mode": "gen",
                     "packed_vae_token_indexes": packed_vae_token_indexes,
-                    "packed_text_indexes": packed_text_indexes
+                    "packed_text_indexes": packed_text_indexes,
                 }
 
             output = ops.stop_gradient(
@@ -811,12 +809,12 @@ class Bagel(PreTrainedModel):
                     **extra_inputs,
                 )
             )
-            v_t = self.llm2vae(output.packed_query_sequence)
+            v_t = self.llm2vae(output["packed_query_sequence"])
             v_t = v_t[packed_vae_token_indexes]
 
             if cfg_text_scale > 1.0:
                 cfg_text_output = ops.stop_gradient(
-                        self.language_model.forward_inference(
+                    self.language_model.forward_inference(
                         packed_query_sequence=packed_sequence,
                         query_lens=packed_seqlens,
                         packed_query_position_ids=cfg_text_packed_position_ids,
@@ -829,12 +827,12 @@ class Bagel(PreTrainedModel):
                         **extra_inputs,
                     )
                 )
-                cfg_text_v_t = ops.stop_gradient(self.llm2vae(cfg_text_output.packed_query_sequence))
+                cfg_text_v_t = ops.stop_gradient(self.llm2vae(cfg_text_output["packed_query_sequence"]))
                 cfg_text_v_t = cfg_text_v_t[packed_vae_token_indexes]
 
             if cfg_img_scale > 1.0:
                 cfg_img_output = ops.stop_gradient(
-                        self.language_model.forward_inference(
+                    self.language_model.forward_inference(
                         packed_query_sequence=packed_sequence,
                         query_lens=packed_seqlens,
                         packed_query_position_ids=cfg_img_packed_position_ids,
@@ -847,7 +845,7 @@ class Bagel(PreTrainedModel):
                         **extra_inputs,
                     )
                 )
-                cfg_img_v_t = ops.stop_gradient(self.llm2vae(cfg_img_output.packed_query_sequence))
+                cfg_img_v_t = ops.stop_gradient(self.llm2vae(cfg_img_output["packed_query_sequence"]))
                 cfg_img_v_t = cfg_img_v_t[packed_vae_token_indexes]
 
             if cfg_text_scale > 1.0:
@@ -893,7 +891,7 @@ class Bagel(PreTrainedModel):
         curr = 0
         for curr_kvlen, curr_position_id in zip(curr_kvlens, curr_rope):
             packed_key_value_indexes.extend(range(curr, curr + curr_kvlen))
-            packed_start_tokens.append(new_token_ids['bos_token_id'])
+            packed_start_tokens.append(new_token_ids["bos_token_id"])
             packed_query_position_ids.append(curr_position_id)
             curr += curr_kvlen
 
@@ -928,8 +926,7 @@ class Bagel(PreTrainedModel):
                 packed_text_embedding = ops.stop_gradient(self.language_model.model.embed_tokens(curr_tokens))
                 query_lens = mint.ones_like(curr_tokens)
                 packed_query_indexes = mint.cumsum(key_values_lens, dim=0) + mint.arange(
-                    0, len(key_values_lens),
-                    dtype=key_values_lens.dtype
+                    0, len(key_values_lens), dtype=key_values_lens.dtype
                 )
 
                 uppacked = list(packed_key_value_indexes.split(key_values_lens.tolist(), dim=0))
@@ -955,8 +952,8 @@ class Bagel(PreTrainedModel):
                         **extra_inputs,
                     )
                 )
-                past_key_values = output.past_key_values
-                packed_query_sequence = output.packed_query_sequence
+                past_key_values = output["past_key_values"]
+                packed_query_sequence = output["packed_query_sequence"]
                 pred_logits = ops.stop_gradient(self.language_model.lm_head(packed_query_sequence))
 
                 if do_sample:
@@ -967,15 +964,13 @@ class Bagel(PreTrainedModel):
 
                 uppacked = list(packed_key_value_indexes.split(key_values_lens.tolist(), dim=0))
                 for i in range(len(uppacked)):
-                    uppacked[i] = mint.cat(
-                        [uppacked[i], ms.tensor([uppacked[i][-1] + 1])], dim=0
-                    )
+                    uppacked[i] = mint.cat([uppacked[i], ms.tensor([uppacked[i][-1] + 1])], dim=0)
                 packed_key_value_indexes = mint.cat(uppacked, dim=0)
                 key_values_lens = key_values_lens + 1
                 packed_query_position_ids = packed_query_position_ids + 1
                 step += 1
 
-                if end_token_id is not None and curr_tokens[0] == end_token_id: # only support batch=1
+                if end_token_id is not None and curr_tokens[0] == end_token_id:  # only support batch=1
                     break
 
             return mint.stack(generated_sequence, dim=0)
@@ -994,7 +989,6 @@ class Bagel(PreTrainedModel):
         temperature: float = 1.0,
     ):
         with no_grad():
-
             if isinstance(new_token_ids, dict):
                 for k, v in new_token_ids.items():
                     if isinstance(v, ms.Tensor):
@@ -1047,10 +1041,10 @@ class Bagel(PreTrainedModel):
                 max_length=max_length,
                 do_sample=do_sample,
                 temperature=temperature,
-                end_token_id=new_token_ids['eos_token_id'],
+                end_token_id=new_token_ids["eos_token_id"],
                 **generation_input,
             )
-            output = ops.stop_gradient(tokenizer.decode(unpacked_latent[:,0]))
-            output = output.split('<|im_end|>')[0].split('<|im_start|>')[1]
+            output = ops.stop_gradient(tokenizer.decode(unpacked_latent[:, 0]))
+            output = output.split("<|im_end|>")[0].split("<|im_start|>")[1]
 
         return output

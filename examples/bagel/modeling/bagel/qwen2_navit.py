@@ -14,13 +14,17 @@ from dataclasses import dataclass
 from functools import partial
 from typing import List, Optional, Tuple
 
-import mindspore as ms
-from mindspore import nn, mint, ops
-import mindspore.mint.nn.functional as F
+# from modeling.qwen2.configuration_qwen2 import Qwen2Config as _Qwen2Config
+from transformers import Qwen2Config as _Qwen2Config
+
 # from torch.mint.nn.attention import SDPBackend, sdpa_kernel
 # from torch.mint.nn.attention.flex_attention import flex_attention
 # from torch.mint.nn.functional import scaled_dot_product_attention
 from transformers.utils import ModelOutput
+
+import mindspore as ms
+import mindspore.mint.nn.functional as F
+from mindspore import mint, nn, ops
 
 # from modeling.qwen2.modeling_qwen2 import (
 from mindone.transformers.models.qwen2.modeling_qwen2 import (
@@ -31,9 +35,9 @@ from mindone.transformers.models.qwen2.modeling_qwen2 import (
     Qwen2RotaryEmbedding,
     apply_rotary_pos_emb,
 )
-# from modeling.qwen2.configuration_qwen2 import Qwen2Config as _Qwen2Config
-from transformers import Qwen2Config as _Qwen2Config
-from mindone.transformers.mindspore_adapter import scaled_dot_product_attention
+
+# from mindone.transformers.mindspore_adapter import scaled_dot_product_attention
+
 
 # torch._dynamo.config.cache_size_limit = 512
 # torch._dynamo.config.accumulated_cache_size_limit = 4096
@@ -287,8 +291,12 @@ class PackedAttention(Qwen2Attention):
                 # )
                 # For `attn_mask` of ops.flash_attention_score, False indicates retention and True indicates discard,
                 # Which is opposite to PyTorch
-                attention_mask = mint.logical_not(attention_mask_per_sample) if attention_mask_per_sample.dtype == ms.bool_ else attention_mask_per_sample.bool()
-                attn_output = ops.flash_attention_score(
+                attention_mask = (
+                    mint.logical_not(attention_mask_per_sample)
+                    if attention_mask_per_sample.dtype == ms.bool_
+                    else attention_mask_per_sample.bool()
+                )
+                packed_attn_output = ops.flash_attention_score(
                     query_states.to(ms.bfloat16).unsqueeze(0),
                     key_states.to(ms.bfloat16).unsqueeze(0),
                     value_states.to(ms.bfloat16).unsqueeze(0),
@@ -354,7 +362,7 @@ class PackedAttention(Qwen2Attention):
             past_key_states = past_key_values.key_cache[self.layer_idx]
             past_value_states = past_key_values.value_cache[self.layer_idx]
 
-            seqlens = sum(query_lens) + sum(key_values_lens)
+            seqlens = (sum(query_lens) + sum(key_values_lens)).item()
             merged_key_states = past_key_states.new_zeros((seqlens, self.num_key_value_heads, self.head_dim))
             merged_value_states = past_key_states.new_zeros((seqlens, self.num_key_value_heads, self.head_dim))
             merged_key_states[packed_query_indexes] = packed_key_states
@@ -424,8 +432,12 @@ class PackedAttentionMoT(Qwen2Attention):
         packed_gen_token_indexes: ms.Tensor,
     ):
         packed_query_states = packed_sequence.new_zeros((packed_sequence.shape[0], self.num_heads * self.head_dim))
-        packed_key_states = packed_sequence.new_zeros((packed_sequence.shape[0], self.num_key_value_heads * self.head_dim))
-        packed_value_states = packed_sequence.new_zeros((packed_sequence.shape[0], self.num_key_value_heads * self.head_dim))
+        packed_key_states = packed_sequence.new_zeros(
+            (packed_sequence.shape[0], self.num_key_value_heads * self.head_dim)
+        )
+        packed_value_states = packed_sequence.new_zeros(
+            (packed_sequence.shape[0], self.num_key_value_heads * self.head_dim)
+        )
 
         packed_sequence_und = packed_sequence[packed_und_token_indexes]
         packed_sequence_gen = packed_sequence[packed_gen_token_indexes]
@@ -454,7 +466,9 @@ class PackedAttentionMoT(Qwen2Attention):
         if self.config.freeze_und:
             # packed_query_states_[packed_und_token_indexes] = packed_query_states_[packed_und_token_indexes].detach()
             packed_query_states_[packed_und_token_indexes].requires_grad = False
-        packed_query_states_[packed_gen_token_indexes] = self.q_norm_moe_gen(packed_query_states[packed_gen_token_indexes])
+        packed_query_states_[packed_gen_token_indexes] = self.q_norm_moe_gen(
+            packed_query_states[packed_gen_token_indexes]
+        )
 
         packed_key_states_[packed_und_token_indexes] = self.k_norm(packed_key_states[packed_und_token_indexes])
         if self.config.freeze_und:
@@ -488,7 +502,11 @@ class PackedAttentionMoT(Qwen2Attention):
                 # )
                 # For `attn_mask` of ops.flash_attention_score, False indicates retention and True indicates discard,
                 # Which is opposite to PyTorch
-                attention_mask = mint.logical_not(attention_mask_per_sample) if attention_mask_per_sample.dtype == ms.bool_ else attention_mask_per_sample.bool()
+                attention_mask = (
+                    mint.logical_not(attention_mask_per_sample)
+                    if attention_mask_per_sample.dtype == ms.bool_
+                    else attention_mask_per_sample.bool()
+                )
                 attn_output = ops.flash_attention_score(
                     query_states.to(ms.bfloat16).unsqueeze(0),
                     key_states.to(ms.bfloat16).unsqueeze(0),
@@ -517,7 +535,9 @@ class PackedAttentionMoT(Qwen2Attention):
         packed_attn_output = packed_attn_output.swapaxes(0, 1).reshape(-1, self.num_heads * self.head_dim)
         packed_attn_output_ = packed_attn_output.new_zeros(packed_attn_output.shape)
         packed_attn_output_[packed_und_token_indexes] = self.o_proj(packed_attn_output[packed_und_token_indexes])
-        packed_attn_output_[packed_gen_token_indexes] = self.o_proj_moe_gen(packed_attn_output[packed_gen_token_indexes])
+        packed_attn_output_[packed_gen_token_indexes] = self.o_proj_moe_gen(
+            packed_attn_output[packed_gen_token_indexes]
+        )
 
         return packed_attn_output_
 
@@ -535,18 +555,25 @@ class PackedAttentionMoT(Qwen2Attention):
         mode="und",
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
+        position_ids=None,
     ):
-        if mode == 'und':
+        if mode == "und":
             packed_query_states = self.q_proj(packed_query_sequence).view(-1, self.num_heads, self.head_dim)
             packed_key_states = self.k_proj(packed_query_sequence).view(-1, self.num_key_value_heads, self.head_dim)
             packed_value_states = self.v_proj(packed_query_sequence).view(-1, self.num_key_value_heads, self.head_dim)
             packed_query_states = self.q_norm(packed_query_states)
             packed_key_states = self.k_norm(packed_key_states)
-        elif mode == 'gen':
+        elif mode == "gen":
             packed_query_sequence = packed_query_sequence.to(ms.bfloat16)
-            packed_query_states = packed_query_sequence.new_zeros((packed_query_sequence.shape[0], self.num_heads * self.head_dim))
-            packed_key_states = packed_query_sequence.new_zeros((packed_query_sequence.shape[0], self.num_key_value_heads * self.head_dim))
-            packed_value_states = packed_query_sequence.new_zeros((packed_query_sequence.shape[0], self.num_key_value_heads * self.head_dim))
+            packed_query_states = packed_query_sequence.new_zeros(
+                (packed_query_sequence.shape[0], self.num_heads * self.head_dim)
+            )
+            packed_key_states = packed_query_sequence.new_zeros(
+                (packed_query_sequence.shape[0], self.num_key_value_heads * self.head_dim)
+            )
+            packed_value_states = packed_query_sequence.new_zeros(
+                (packed_query_sequence.shape[0], self.num_key_value_heads * self.head_dim)
+            )
 
             packed_text_query_sequence = packed_query_sequence[packed_text_indexes]
             packed_vae_query_sequence = packed_query_sequence[packed_vae_token_indexes]
@@ -566,15 +593,24 @@ class PackedAttentionMoT(Qwen2Attention):
 
             packed_query_states = packed_query_states.to(ms.float32)
             packed_query_states[packed_text_indexes] = self.q_norm(packed_query_states[packed_text_indexes])
-            packed_query_states[packed_vae_token_indexes] = self.q_norm_moe_gen(packed_query_states[packed_vae_token_indexes])
+            packed_query_states[packed_vae_token_indexes] = self.q_norm_moe_gen(
+                packed_query_states[packed_vae_token_indexes]
+            )
 
             packed_key_states = packed_key_states.to(ms.float32)
             packed_key_states[packed_text_indexes] = self.k_norm(packed_key_states[packed_text_indexes])
-            packed_key_states[packed_vae_token_indexes] = self.k_norm_moe_gen(packed_key_states[packed_vae_token_indexes])
+            packed_key_states[packed_vae_token_indexes] = self.k_norm_moe_gen(
+                packed_key_states[packed_vae_token_indexes]
+            )
 
         packed_cos, packed_sin = packed_query_position_embeddings
+        # TODO: uncomment it once Qwen2 got upgraded
+        # packed_query_states, packed_key_states = apply_rotary_pos_emb(
+        #     packed_query_states, packed_key_states, packed_cos, packed_sin, unsqueeze_dim=1
+        # )
+        # TODO: remove it once Qwen2 got upgraded
         packed_query_states, packed_key_states = apply_rotary_pos_emb(
-            packed_query_states, packed_key_states, packed_cos, packed_sin, unsqueeze_dim=1
+            packed_query_states, packed_key_states, packed_cos, packed_sin, position_ids, unsqueeze_dim=1
         )
 
         packed_query_states = packed_query_states.to(ms.bfloat16)
@@ -585,7 +621,7 @@ class PackedAttentionMoT(Qwen2Attention):
             past_key_states = past_key_values.key_cache[self.layer_idx]
             past_value_states = past_key_values.value_cache[self.layer_idx]
 
-            seqlens = sum(query_lens) + sum(key_values_lens)
+            seqlens = (sum(query_lens) + sum(key_values_lens)).item()
             merged_key_states = past_key_states.new_zeros(size=[seqlens, self.num_key_value_heads, self.head_dim])
             merged_value_states = past_key_states.new_zeros(size=[seqlens, self.num_key_value_heads, self.head_dim])
             merged_key_states[packed_query_indexes] = packed_key_states
@@ -612,7 +648,7 @@ class PackedAttentionMoT(Qwen2Attention):
         #     causal=is_causal,
         # )
         # if is_causal:
-            # TODO: double check
+        # TODO: double check
         packed_attn_output = ops.flash_attention_score(
             packed_query_states,
             merged_key_states,
@@ -623,11 +659,13 @@ class PackedAttentionMoT(Qwen2Attention):
             input_layout="TND",
         )
         packed_attn_output = packed_attn_output.reshape(-1, self.hidden_size)
-        if mode == 'und':
+        if mode == "und":
             packed_attn_output = self.o_proj(packed_attn_output)
-        elif mode == 'gen':
+        elif mode == "gen":
             packed_attn_output[packed_text_indexes] = self.o_proj(packed_attn_output[packed_text_indexes])
-            packed_attn_output[packed_vae_token_indexes] = self.o_proj_moe_gen(packed_attn_output[packed_vae_token_indexes])
+            packed_attn_output[packed_vae_token_indexes] = self.o_proj_moe_gen(
+                packed_attn_output[packed_vae_token_indexes]
+            )
 
         if update_past_key_values:
             past_key_values.key_cache[self.layer_idx] = merged_key_states
@@ -660,7 +698,6 @@ class Qwen2DecoderLayer(nn.Cell):
         attention_mask,
         packed_position_embeddings: Tuple[ms.Tensor, ms.Tensor],
     ) -> ms.Tensor:
-
         residual = packed_sequence
         packed_sequence = self.input_layernorm(packed_sequence)
 
@@ -693,7 +730,6 @@ class Qwen2DecoderLayer(nn.Cell):
         update_past_key_values=True,
         is_causal=True,
     ) -> BaseNavitOutputWithPast:
-
         residual = packed_query_sequence
         packed_query_sequence = self.input_layernorm(packed_query_sequence)
 
@@ -755,11 +791,12 @@ class Qwen2MoTDecoderLayer(nn.Cell):
         packed_und_token_indexes: ms.Tensor,
         packed_gen_token_indexes: ms.Tensor,
     ) -> ms.Tensor:
-
         residual = packed_sequence
         packed_sequence_ = packed_sequence.new_zeros(packed_sequence.shape)
         packed_sequence_[packed_und_token_indexes] = self.input_layernorm(packed_sequence[packed_und_token_indexes])
-        packed_sequence_[packed_gen_token_indexes] = self.input_layernorm_moe_gen(packed_sequence[packed_gen_token_indexes])
+        packed_sequence_[packed_gen_token_indexes] = self.input_layernorm_moe_gen(
+            packed_sequence[packed_gen_token_indexes]
+        )
 
         # Self Attention
         packed_sequence_ = self.self_attn(
@@ -805,15 +842,19 @@ class Qwen2MoTDecoderLayer(nn.Cell):
         mode="und",
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
+        position_ids=None,
     ) -> BaseNavitOutputWithPast:
-
         residual = packed_query_sequence
         if mode == "und":
             packed_query_sequence = self.input_layernorm(packed_query_sequence)
         elif mode == "gen":
             packed_query_sequence_ = mint.zeros_like(packed_query_sequence)
-            packed_query_sequence_[packed_text_indexes] = self.input_layernorm(packed_query_sequence[packed_text_indexes])
-            packed_query_sequence_[packed_vae_token_indexes] = self.input_layernorm_moe_gen(packed_query_sequence[packed_vae_token_indexes])
+            packed_query_sequence_[packed_text_indexes] = self.input_layernorm(
+                packed_query_sequence[packed_text_indexes]
+            )
+            packed_query_sequence_[packed_vae_token_indexes] = self.input_layernorm_moe_gen(
+                packed_query_sequence[packed_vae_token_indexes]
+            )
             packed_query_sequence = packed_query_sequence_
 
         # Self Attention
@@ -830,6 +871,7 @@ class Qwen2MoTDecoderLayer(nn.Cell):
             mode=mode,
             packed_vae_token_indexes=packed_vae_token_indexes,
             packed_text_indexes=packed_text_indexes,
+            position_ids=position_ids,
         )
         packed_query_sequence = residual + packed_query_sequence
 
@@ -880,7 +922,6 @@ class Qwen2MoEDecoderLayer(nn.Cell):
         packed_und_token_indexes: ms.Tensor,
         packed_gen_token_indexes: ms.Tensor,
     ) -> ms.Tensor:
-
         residual = packed_sequence
         packed_sequence = self.input_layernorm(packed_sequence)
 
@@ -922,7 +963,6 @@ class Qwen2MoEDecoderLayer(nn.Cell):
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
     ) -> BaseNavitOutputWithPast:
-
         residual = packed_query_sequence
         packed_query_sequence = self.input_layernorm(packed_query_sequence)
 
@@ -948,7 +988,9 @@ class Qwen2MoEDecoderLayer(nn.Cell):
         elif mode == "gen":
             packed_query_sequence_ = mint.zeros_like(packed_query_sequence).to(ms.bfloat16)
             packed_query_sequence_[packed_text_indexes] = self.mlp(packed_query_sequence[packed_text_indexes])
-            packed_query_sequence_[packed_vae_token_indexes] = self.mlp_moe_gen(packed_query_sequence[packed_vae_token_indexes])
+            packed_query_sequence_[packed_vae_token_indexes] = self.mlp_moe_gen(
+                packed_query_sequence[packed_vae_token_indexes]
+            )
             packed_query_sequence = packed_query_sequence_
         packed_query_sequence = residual + packed_query_sequence
 
@@ -967,13 +1009,11 @@ class Qwen2Model(Qwen2PreTrainedModel):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.use_moe = 'Mo' in config.layer_module
+        self.use_moe = "Mo" in config.layer_module
 
         self.embed_tokens = mint.nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
         layer_module = Decoder_layer_dict[config.layer_module]
-        self.layers = nn.CellList(
-            [layer_module(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
-        )
+        self.layers = nn.CellList([layer_module(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
 
         self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         if self.use_moe:
@@ -998,15 +1038,19 @@ class Qwen2Model(Qwen2PreTrainedModel):
         packed_und_token_indexes: Optional[ms.Tensor] = None,
         packed_gen_token_indexes: Optional[ms.Tensor] = None,
     ) -> ms.Tensor:
-
         if self.config.freeze_und:
             # packed_sequence[packed_und_token_indexes] = packed_sequence[packed_und_token_indexes].detach()
             packed_sequence[packed_und_token_indexes].requires_grad = False
 
         # create position embeddings to be shared across the decoder layers
-        cos, sin = self.rotary_emb(packed_sequence, packed_position_ids.unsqueeze(0))
-        cos = cos.squeeze(0)
-        sin = sin.squeeze(0)
+
+        # TODO: uncomment it once Qwen2 got upgraded
+        # cos, sin = self.rotary_emb(packed_sequence, packed_position_ids.unsqueeze(0))
+        # cos = cos.squeeze(0)
+        # sin = sin.squeeze(0)
+        # packed_position_embeddings = (cos, sin)
+        # TODO: remove it once Qwen2 got upgraded
+        cos, sin = self.rotary_emb(packed_sequence, packed_position_ids.unsqueeze(0).shape[0])
         packed_position_embeddings = (cos, sin)
 
         extra_inputs = {}
@@ -1025,7 +1069,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 sample_lens=sample_lens,
                 attention_mask=attention_mask,
                 packed_position_embeddings=packed_position_embeddings,
-                **extra_inputs
+                **extra_inputs,
             )
 
         if self.use_moe:
@@ -1054,17 +1098,20 @@ class Qwen2Model(Qwen2PreTrainedModel):
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
     ) -> BaseNavitOutputWithPast:
-
         # create position embeddings to be shared across the decoder layers
-        cos, sin = self.rotary_emb(packed_query_sequence, packed_query_position_ids.unsqueeze(0))
-        cos = cos.squeeze(0)
-        sin = sin.squeeze(0)
+        # TODO: uncomment it once Qwen2 got upgraded
+        # cos, sin = self.rotary_emb(packed_query_sequence, packed_query_position_ids.unsqueeze(0))
+        # cos = cos.squeeze(0)
+        # sin = sin.squeeze(0)
+        # packed_query_position_embeddings = (cos, sin)
+        # TODO: remove it once Qwen2 got upgraded
+        cos, sin = self.rotary_emb(packed_query_sequence, packed_query_position_ids.unsqueeze(0).shape[0])
         packed_query_position_embeddings = (cos, sin)
 
         extra_inputs = {}
         if self.use_moe:
             extra_inputs.update(mode=mode)
-            if mode == 'gen':
+            if mode == "gen":
                 assert packed_vae_token_indexes is not None
                 assert packed_text_indexes is not None
                 extra_inputs.update(
@@ -1083,6 +1130,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 packed_key_value_indexes=packed_key_value_indexes,
                 update_past_key_values=update_past_key_values,
                 is_causal=is_causal,
+                position_ids=packed_query_position_ids,
                 **extra_inputs,
             )
 
@@ -1092,7 +1140,9 @@ class Qwen2Model(Qwen2PreTrainedModel):
             elif mode == "gen":
                 packed_query_sequence_ = mint.zeros_like(packed_query_sequence)
                 packed_query_sequence_[packed_text_indexes] = self.norm(packed_query_sequence[packed_text_indexes])
-                packed_query_sequence_[packed_vae_token_indexes] = self.norm_moe_gen(packed_query_sequence[packed_vae_token_indexes])
+                packed_query_sequence_[packed_vae_token_indexes] = self.norm_moe_gen(
+                    packed_query_sequence[packed_vae_token_indexes]
+                )
                 packed_query_sequence = packed_query_sequence_
         else:
             packed_query_sequence = self.norm(packed_query_sequence)
@@ -1119,7 +1169,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         for name, param in self.parameters_and_names():
             if "moe_gen" in name:
                 original_name = name.replace("_moe_gen", "")
-                param.data.copy_(self.state_dict()[original_name].data) # TODO: not sure
+                param.data.copy_(self.state_dict()[original_name].data)  # TODO: not sure
                 # param.set_data(self.state_dict()[original_name]) # TODO
 
     def get_input_embeddings(self):
@@ -1155,7 +1205,6 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         packed_und_token_indexes: Optional[ms.Tensor] = None,
         packed_gen_token_indexes: Optional[ms.Tensor] = None,
     ) -> ms.Tensor:
-
         outputs = self.model(
             packed_sequence=packed_sequence,
             sample_lens=sample_lens,
@@ -1181,7 +1230,6 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel):
         packed_vae_token_indexes=None,
         packed_text_indexes=None,
     ) -> BaseNavitOutputWithPast:
-
         outputs = self.model(
             packed_query_sequence=packed_query_sequence,
             query_lens=query_lens,

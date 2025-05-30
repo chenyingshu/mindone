@@ -1,6 +1,7 @@
 import mindspore as ms
 from mindspore import _no_grad, jit_class
 
+
 @jit_class
 class no_grad(_no_grad):
     """

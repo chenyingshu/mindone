@@ -4,15 +4,17 @@
 
 import math
 import random
-from PIL import Image
 from typing import Callable
+
 import numpy as np
+from PIL import Image
 
 import mindspore as ms
 from mindspore import Tensor, mint, ops
 
 _MIN_FP16 = ms.tensor(np.finfo(np.float16).min, dtype=ms.float16)
 _mask_mod_signature = Callable[[Tensor, Tensor, Tensor, Tensor], Tensor]
+
 
 # refer to torch.nn.attention.flex_attention.or_masks and and_masks
 def or_masks(*mask_mods: _mask_mod_signature) -> _mask_mod_signature:
@@ -28,6 +30,7 @@ def or_masks(*mask_mods: _mask_mod_signature) -> _mask_mod_signature:
 
     return or_mask
 
+
 # refer to torch.nn.attention.flex_attention.and_masks
 def and_masks(*mask_mods: _mask_mod_signature) -> _mask_mod_signature:
     """Returns a mask_mod that's the intersection of provided mask_mods"""
@@ -42,6 +45,7 @@ def and_masks(*mask_mods: _mask_mod_signature) -> _mask_mod_signature:
 
     return and_mask
 
+
 def create_sparse_mask(document_lens, split_lens, attn_modes):
     def causal_mask(b, h, q_idx, kv_idx):
         return q_idx >= kv_idx
@@ -50,7 +54,7 @@ def create_sparse_mask(document_lens, split_lens, attn_modes):
         return (full_and_noise_seq_id[q_idx] == full_and_noise_seq_id[kv_idx]) & (full_and_noise_seq_id[q_idx] >= 0)
 
     def remove_noise_mask(b, h, q_idx, kv_idx):
-        return (~((noise_seq_id[kv_idx] >= 0) & (noise_seq_id[q_idx] != noise_seq_id[kv_idx])))
+        return ~((noise_seq_id[kv_idx] >= 0) & (noise_seq_id[q_idx] != noise_seq_id[kv_idx]))
 
     def sample_mask(b, h, q_idx, kv_idx):
         return document_id[q_idx] == document_id[kv_idx]
@@ -59,9 +63,9 @@ def create_sparse_mask(document_lens, split_lens, attn_modes):
     noise_tmp = []
 
     for i, (length, model) in enumerate(zip(split_lens, attn_modes)):
-        value = i if model in ['full', 'noise'] else -1
+        value = i if model in ["full", "noise"] else -1
         full_and_noise_tmp.extend([value] * length)
-        value_noise = i if model == 'noise' else -1
+        value_noise = i if model == "noise" else -1
         noise_tmp.extend([value_noise] * length)
 
     full_and_noise_seq_id = ms.Tensor(full_and_noise_tmp)
@@ -112,13 +116,13 @@ def prepare_attention_mask_per_sample(split_lens, attn_modes):
 
     csum = 0
     for s, attn_mode in zip(split_lens, attn_modes):
-        assert attn_mode in ['causal', 'full', 'noise']
+        assert attn_mode in ["causal", "full", "noise"]
         if attn_mode == "causal":
-            attention_mask[csum:csum + s, csum:csum + s] = mint.ones((s, s), dtype=ms.bool_).tril()
-            attention_mask[csum:csum + s, :csum] = 1
+            attention_mask[csum : csum + s, csum : csum + s] = mint.ones((s, s), dtype=ms.bool_).tril()
+            attention_mask[csum : csum + s, :csum] = 1
         else:
-            attention_mask[csum:csum + s, csum:csum + s] = mint.ones((s, s), dtype=ms.bool_)
-            attention_mask[csum:csum + s, :csum] = 1
+            attention_mask[csum : csum + s, csum : csum + s] = mint.ones((s, s), dtype=ms.bool_)
+            attention_mask[csum : csum + s, :csum] = 1
         csum += s
 
     csum = 0
@@ -130,7 +134,7 @@ def prepare_attention_mask_per_sample(split_lens, attn_modes):
 
     attention_mask = mint.zeros_like(attention_mask, dtype=ms.float16).masked_fill_(
         ~attention_mask, _MIN_FP16
-    ) # TODO: double check if the change works: float32/float("-inf") -> float16/_MIN_FP16
+    )  # TODO: double check if the change works: float32/float("-inf") -> float16/_MIN_FP16
 
     return attention_mask
 
@@ -143,7 +147,7 @@ def split_integer_exp_decay(S, ng_sample_decay=1.0):
         p = [base * math.pow(ng_sample_decay, i) for i in range(S)]
         N = random.choices(list(range(1, S + 1)), p, k=1)[0]
     cumsum = [0] + sorted(random.sample(range(1, S), N - 1)) + [S]
-    result = [cumsum[i+1] - cumsum[i] for i in range(len(cumsum) - 1)]
+    result = [cumsum[i + 1] - cumsum[i] for i in range(len(cumsum) - 1)]
     return result, cumsum
 
 
@@ -169,23 +173,23 @@ def add_special_tokens(tokenizer):
 
     new_tokens = []
 
-    if '<|im_start|>' not in all_special_tokens:
-        new_tokens.append('<|im_start|>')
+    if "<|im_start|>" not in all_special_tokens:
+        new_tokens.append("<|im_start|>")
 
-    if '<|im_end|>' not in all_special_tokens:
-        new_tokens.append('<|im_end|>')
+    if "<|im_end|>" not in all_special_tokens:
+        new_tokens.append("<|im_end|>")
 
-    if '<|vision_start|>' not in all_special_tokens:
-        new_tokens.append('<|vision_start|>')
+    if "<|vision_start|>" not in all_special_tokens:
+        new_tokens.append("<|vision_start|>")
 
-    if '<|vision_end|>' not in all_special_tokens:
-        new_tokens.append('<|vision_end|>')
+    if "<|vision_end|>" not in all_special_tokens:
+        new_tokens.append("<|vision_end|>")
 
     num_new_tokens = tokenizer.add_tokens(new_tokens)
-    bos_token_id = tokenizer.convert_tokens_to_ids('<|im_start|>')
-    eos_token_id = tokenizer.convert_tokens_to_ids('<|im_end|>')
-    start_of_image = tokenizer.convert_tokens_to_ids('<|vision_start|>')
-    end_of_image = tokenizer.convert_tokens_to_ids('<|vision_end|>')
+    bos_token_id = tokenizer.convert_tokens_to_ids("<|im_start|>")
+    eos_token_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
+    start_of_image = tokenizer.convert_tokens_to_ids("<|vision_start|>")
+    end_of_image = tokenizer.convert_tokens_to_ids("<|vision_end|>")
 
     new_token_ids = dict(
         bos_token_id=bos_token_id,
@@ -197,13 +201,13 @@ def add_special_tokens(tokenizer):
     return tokenizer, new_token_ids, num_new_tokens
 
 
-def len2weight(x, loss_reduction='square'):
+def len2weight(x, loss_reduction="square"):
     if x == 0:
         return x
-    if loss_reduction == 'token':
+    if loss_reduction == "token":
         return 1
-    if loss_reduction == 'sample':
+    if loss_reduction == "sample":
         return 1 / x
-    if loss_reduction == 'square':
-        return 1 / (x ** 0.5)
+    if loss_reduction == "square":
+        return 1 / (x**0.5)
     raise NotImplementedError(loss_reduction)

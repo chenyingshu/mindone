@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import random
-from PIL import Image
 
 import cv2
 import numpy as np
+from PIL import Image
+
 import mindspore as ms
-from mindspore import mint, nn
-from mindspore.dataset import transforms, vision
+from mindspore import nn
+from mindspore.dataset import vision
+
 
 class MaxLongEdgeMinShortEdgeResize(nn.Cell):
     """Resize the input image so that its longest side and shortest side are within a specified range,
@@ -33,7 +35,7 @@ class MaxLongEdgeMinShortEdgeResize(nn.Cell):
         stride: int,
         max_pixels: int,
         interpolation=vision.Inter.BICUBIC,
-        antialias=True
+        antialias=True,
     ):
         super().__init__()
         self.max_size = max_size
@@ -41,7 +43,7 @@ class MaxLongEdgeMinShortEdgeResize(nn.Cell):
         self.stride = stride
         self.max_pixels = max_pixels
         self.interpolation = interpolation
-        self.antialias = antialias # not supported
+        self.antialias = antialias  # not supported
 
     def _make_divisible(self, value, stride):
         """Ensure the value is divisible by the stride."""
@@ -88,9 +90,9 @@ class ImageTransform:
         max_image_size,
         min_image_size,
         image_stride,
-        max_pixels=14*14*9*1024,
+        max_pixels=14 * 14 * 9 * 1024,
         image_mean=[0.5, 0.5, 0.5],
-        image_std=[0.5, 0.5, 0.5]
+        image_std=[0.5, 0.5, 0.5],
     ):
         self.stride = image_stride
 
@@ -100,19 +102,19 @@ class ImageTransform:
             stride=image_stride,
             max_pixels=max_pixels,
         )
-        self.to_tensor_transform = vision.ToTensor() # HWC -> CHW
+        self.to_tensor_transform = vision.ToTensor()  # HWC -> CHW
         self.normalize_transform = vision.Normalize(mean=image_mean, std=image_std, is_hwc=False)
 
     def __call__(self, img, img_num=1):
         img = self.resize_transform(img, img_num=img_num)
         img = self.to_tensor_transform(img)
         img = self.normalize_transform(img)
-        return ms.Tensor(img[0]) # tuple(CHW) numpy array => Tensor(CHW)
+        return ms.Tensor(img)  # tuple(CHW) numpy array => Tensor(CHW)
 
 
 def decolorization(image):
-    gray_image = image.convert('L')
-    return Image.merge(image.mode, [gray_image] * 3) if image.mode in ('RGB', 'L') else gray_image
+    gray_image = image.convert("L")
+    return Image.merge(image.mode, [gray_image] * 3) if image.mode in ("RGB", "L") else gray_image
 
 
 def downscale(image, scale_factor):

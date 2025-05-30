@@ -6,11 +6,7 @@
 from typing import Dict, List, Optional, Union
 
 from mindone.transformers.image_processing_utils import BaseImageProcessor, BatchFeature, get_size_dict
-from mindone.transformers.image_transforms import (
-    convert_to_rgb,
-    resize,
-    to_channel_dimension_format,
-)
+from mindone.transformers.image_transforms import convert_to_rgb, resize, to_channel_dimension_format
 from mindone.transformers.image_utils import (
     IMAGENET_STANDARD_MEAN,
     IMAGENET_STANDARD_STD,
@@ -25,7 +21,6 @@ from mindone.transformers.image_utils import (
     validate_preprocess_arguments,
 )
 from mindone.transformers.utils import TensorType, filter_out_non_signature_kwargs, is_vision_available, logging
-
 
 logger = logging.get_logger(__name__)
 
@@ -212,8 +207,7 @@ class SiglipImageProcessor(BaseImageProcessor):
 
         if do_rescale:
             images = [
-                self.rescale(image=image, scale=rescale_factor, input_data_format=input_data_format)
-                for image in images
+                self.rescale(image=image, scale=rescale_factor, input_data_format=input_data_format) for image in images
             ]
 
         if do_normalize:
