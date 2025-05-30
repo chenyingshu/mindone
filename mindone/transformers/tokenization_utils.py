@@ -24,6 +24,8 @@ import unicodedata
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple, Union, overload
 
+from transformers.utils import add_end_docstrings
+
 from .tokenization_utils_base import (
     ENCODE_KWARGS_DOCSTRING,
     ENCODE_PLUS_ADDITIONAL_KWARGS_DOCSTRING,
@@ -39,7 +41,7 @@ from .tokenization_utils_base import (
     TextInputPair,
     TruncationStrategy,
 )
-from .utils import PaddingStrategy, TensorType, add_end_docstrings, logging
+from .utils import PaddingStrategy, TensorType, logging
 
 logger = logging.get_logger(__name__)
 

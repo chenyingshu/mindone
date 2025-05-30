@@ -33,17 +33,10 @@ from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequenc
 
 import numpy as np
 from packaging import version
-
-from . import __version__
-from .dynamic_module_utils import custom_object_save
-from .utils import (
-    ExplicitEnum,
-    PaddingStrategy,
+from transformers.dynamic_module_utils import custom_object_save
+from transformers.utils import (
     PushToHubMixin,
-    TensorType,
     add_end_docstrings,
-    add_model_info_to_auto_map,
-    add_model_info_to_custom_pipelines,
     cached_file,
     copy_func,
     download_url,
@@ -52,7 +45,6 @@ from .utils import (
     is_flax_available,
     is_jax_tensor,
     is_mlx_available,
-    is_numpy_array,
     is_offline_mode,
     is_remote_url,
     is_tf_available,
@@ -61,6 +53,16 @@ from .utils import (
     is_torch_available,
     is_torch_device,
     is_torch_tensor,
+)
+
+from . import __version__
+from .utils import (
+    ExplicitEnum,
+    PaddingStrategy,
+    TensorType,
+    add_model_info_to_auto_map,
+    add_model_info_to_custom_pipelines,
+    is_numpy_array,
     logging,
     requires_backends,
     to_py_obj,
