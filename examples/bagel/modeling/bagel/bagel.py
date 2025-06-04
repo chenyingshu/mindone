@@ -699,6 +699,8 @@ class Bagel(PreTrainedModel):
             timesteps = timesteps[:-1]
 
             for i, t in enumerate(timesteps):
+                print(f"step {i}")
+
                 timestep = ms.tensor([t] * x_t.shape[0])
                 if t > cfg_interval[0] and t <= cfg_interval[1]:
                     cfg_text_scale_ = cfg_text_scale

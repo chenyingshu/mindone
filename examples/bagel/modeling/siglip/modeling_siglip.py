@@ -490,7 +490,7 @@ class SiglipFlashAttention2(SiglipAttention):
         query_states = query_states.view(batch_size, q_len, self.num_heads, self.head_dim).swapaxes(1, 2)
         key_states = key_states.view(batch_size, q_len, self.num_heads, self.head_dim).swapaxes(1, 2)
         value_states = value_states.view(batch_size, q_len, self.num_heads, self.head_dim).swapaxes(1, 2)
-        # "BSND"
+        # "BNSD"
 
         dropout_rate = self.dropout if self.training else 0.0
 

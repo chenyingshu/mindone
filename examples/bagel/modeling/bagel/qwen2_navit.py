@@ -9,41 +9,27 @@
 #
 # This modified file is released under the same license.
 
-
+import math
 from dataclasses import dataclass
 from functools import partial
 from typing import List, Optional, Tuple
 
-# from modeling.qwen2.configuration_qwen2 import Qwen2Config as _Qwen2Config
 from transformers import Qwen2Config as _Qwen2Config
-
-# from torch.mint.nn.attention import SDPBackend, sdpa_kernel
-# from torch.mint.nn.attention.flex_attention import flex_attention
-# from torch.mint.nn.functional import scaled_dot_product_attention
 from transformers.utils import ModelOutput
 
 import mindspore as ms
 import mindspore.mint.nn.functional as F
 from mindspore import mint, nn, ops
 
-# from modeling.qwen2.modeling_qwen2 import (
 from mindone.transformers.models.qwen2.modeling_qwen2 import (
     Qwen2Attention,
     Qwen2MLP,
     Qwen2PreTrainedModel,
-    Qwen2RMSNorm,
-    Qwen2RotaryEmbedding,
-    apply_rotary_pos_emb,
 )
-
-# from mindone.transformers.mindspore_adapter import scaled_dot_product_attention
-
-
-# torch._dynamo.config.cache_size_limit = 512
-# torch._dynamo.config.accumulated_cache_size_limit = 4096
-# flex_attention = torch.compile(flex_attention) # , dynamic=True, mode='max-autotune'
-# flex_attention = torch.compile(flex_attention)
-
+# transformers >= 4.51.0
+from mindone.transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm as Qwen2RMSNorm
+from mindone.transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding as Qwen2RotaryEmbedding
+from mindone.transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
 
 class Qwen2Config(_Qwen2Config):
     r"""
@@ -296,16 +282,15 @@ class PackedAttention(Qwen2Attention):
                     if attention_mask_per_sample.dtype == ms.bool_
                     else attention_mask_per_sample.bool()
                 )
-                packed_attn_output = ops.flash_attention_score(
+                attn_output = ops.flash_attention_score(
                     query_states.to(ms.bfloat16).unsqueeze(0),
                     key_states.to(ms.bfloat16).unsqueeze(0),
                     value_states.to(ms.bfloat16).unsqueeze(0),
                     head_num=self.num_heads,
                     attn_mask=attention_mask,
-                    input_layout="TND",
+                    scalar_value=1 / math.sqrt(query_states.shape[-1]),
+                    input_layout="BNSD",
                 )
-                packed_attn_output = packed_attn_output.reshape(-1, self.hidden_size)
-                packed_attn_output = self.o_proj(packed_attn_output)
                 upacked_attn_output.append(attn_output.squeeze(0))
 
             packed_attn_output = mint.cat(upacked_attn_output, dim=1)
@@ -378,6 +363,12 @@ class PackedAttention(Qwen2Attention):
         cu_seqlens_q = F.pad(mint.cumsum(query_lens, dim=0), (1, 0))
         cu_seqlens_k = F.pad(mint.cumsum(key_values_lens, dim=0), (1, 0))
 
+        seq_len_q = packed_query_states.shape[0]
+        seq_len_k = merged_key_states.shape[0]
+        if self.is_causal and seq_len_q > 1:
+            causal_mask = mint.tril(mint.ones((seq_len_q, seq_len_k), dtype=ms.bool_), diagonal=1)
+        else:
+            causal_mask = None
         packed_attn_output = ops.flash_attention_score(
             packed_query_states,
             merged_key_states,
@@ -385,6 +376,8 @@ class PackedAttention(Qwen2Attention):
             head_num=self.num_heads,
             actual_seq_qlen=cu_seqlens_q.to(ms.int32),
             actual_seq_kvlen=cu_seqlens_k.to(ms.int32),
+            scalar_value=1 / math.sqrt(packed_query_states.shape[-1]),
+            attn_mask=causal_mask,
             input_layout="TND",
         )
         packed_attn_output = packed_attn_output.reshape(-1, self.hidden_size)
@@ -415,6 +408,12 @@ class PackedAttentionMoT(Qwen2Attention):
         self.k_proj_moe_gen = mint.nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
         self.v_proj_moe_gen = mint.nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
         self.o_proj_moe_gen = mint.nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+
+        # overwrite to use mint.nn.Linear, increase computation accuracy in bf16
+        self.q_proj = mint.nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=True)
+        self.k_proj = mint.nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
+        self.v_proj = mint.nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=True)
+        self.o_proj = mint.nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
     def construct(self, *args, **kwargs):
         if self.training:
@@ -512,8 +511,9 @@ class PackedAttentionMoT(Qwen2Attention):
                     key_states.to(ms.bfloat16).unsqueeze(0),
                     value_states.to(ms.bfloat16).unsqueeze(0),
                     head_num=self.num_heads,
+                    scalar_value=1 / math.sqrt(query_states.shape[-1]),
                     attn_mask=attention_mask,
-                    input_layout="TND",
+                    input_layout="BNSD",
                 )
                 upacked_attn_output.append(attn_output.squeeze(0))
             packed_attn_output = mint.cat(upacked_attn_output, dim=1)
@@ -604,13 +604,8 @@ class PackedAttentionMoT(Qwen2Attention):
             )
 
         packed_cos, packed_sin = packed_query_position_embeddings
-        # TODO: uncomment it once Qwen2 got upgraded
-        # packed_query_states, packed_key_states = apply_rotary_pos_emb(
-        #     packed_query_states, packed_key_states, packed_cos, packed_sin, unsqueeze_dim=1
-        # )
-        # TODO: remove it once Qwen2 got upgraded
         packed_query_states, packed_key_states = apply_rotary_pos_emb(
-            packed_query_states, packed_key_states, packed_cos, packed_sin, position_ids, unsqueeze_dim=1
+            packed_query_states, packed_key_states, packed_cos, packed_sin, unsqueeze_dim=1
         )
 
         packed_query_states = packed_query_states.to(ms.bfloat16)
@@ -648,7 +643,13 @@ class PackedAttentionMoT(Qwen2Attention):
         #     causal=is_causal,
         # )
         # if is_causal:
-        # TODO: double check
+
+        seq_len_q = packed_query_states.shape[0]
+        seq_len_k = merged_key_states.shape[0]
+        if self.is_causal and seq_len_q > 1:
+            causal_mask = mint.tril(mint.ones((seq_len_q, seq_len_k), dtype=ms.bool_), diagonal=1)
+        else:
+            causal_mask = None
         packed_attn_output = ops.flash_attention_score(
             packed_query_states,
             merged_key_states,
@@ -656,6 +657,8 @@ class PackedAttentionMoT(Qwen2Attention):
             head_num=self.num_heads,
             actual_seq_qlen=cu_seqlens_q.to(ms.int32),
             actual_seq_kvlen=cu_seqlens_k.to(ms.int32),
+            scalar_value=self.scale,
+            attn_mask=causal_mask,
             input_layout="TND",
         )
         packed_attn_output = packed_attn_output.reshape(-1, self.hidden_size)
@@ -871,7 +874,6 @@ class Qwen2MoTDecoderLayer(nn.Cell):
             mode=mode,
             packed_vae_token_indexes=packed_vae_token_indexes,
             packed_text_indexes=packed_text_indexes,
-            position_ids=position_ids,
         )
         packed_query_sequence = residual + packed_query_sequence
 
@@ -1043,14 +1045,9 @@ class Qwen2Model(Qwen2PreTrainedModel):
             packed_sequence[packed_und_token_indexes].requires_grad = False
 
         # create position embeddings to be shared across the decoder layers
-
-        # TODO: uncomment it once Qwen2 got upgraded
-        # cos, sin = self.rotary_emb(packed_sequence, packed_position_ids.unsqueeze(0))
-        # cos = cos.squeeze(0)
-        # sin = sin.squeeze(0)
-        # packed_position_embeddings = (cos, sin)
-        # TODO: remove it once Qwen2 got upgraded
-        cos, sin = self.rotary_emb(packed_sequence, packed_position_ids.unsqueeze(0).shape[0])
+        cos, sin = self.rotary_emb(packed_sequence, packed_position_ids.unsqueeze(0))
+        cos = cos.squeeze(0)
+        sin = sin.squeeze(0)
         packed_position_embeddings = (cos, sin)
 
         extra_inputs = {}
@@ -1099,13 +1096,9 @@ class Qwen2Model(Qwen2PreTrainedModel):
         packed_text_indexes=None,
     ) -> BaseNavitOutputWithPast:
         # create position embeddings to be shared across the decoder layers
-        # TODO: uncomment it once Qwen2 got upgraded
-        # cos, sin = self.rotary_emb(packed_query_sequence, packed_query_position_ids.unsqueeze(0))
-        # cos = cos.squeeze(0)
-        # sin = sin.squeeze(0)
-        # packed_query_position_embeddings = (cos, sin)
-        # TODO: remove it once Qwen2 got upgraded
-        cos, sin = self.rotary_emb(packed_query_sequence, packed_query_position_ids.unsqueeze(0).shape[0])
+        cos, sin = self.rotary_emb(packed_query_sequence, packed_query_position_ids.unsqueeze(0))
+        cos = cos.squeeze(0)
+        sin = sin.squeeze(0)
         packed_query_position_embeddings = (cos, sin)
 
         extra_inputs = {}

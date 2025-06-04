@@ -6,9 +6,7 @@ from modeling.autoencoder import load_ae
 from modeling.bagel import Bagel, BagelConfig, Qwen2Config, Qwen2ForCausalLM, SiglipVisionConfig, SiglipVisionModel
 from PIL import Image
 
-# from modeling.qwen2 import Qwen2Tokenizer
 from transformers import Qwen2Tokenizer
-
 import mindspore as ms
 
 from examples.bagel.data.transforms import ImageTransform
@@ -84,13 +82,6 @@ start_time = time.time()
 state_dict = ms.load_checkpoint(model_file, format="safetensors")
 # Check loading keys:
 model_state_dict = {k: v for k, v in model.parameters_and_names()}
-# state_dict_tmp = {}
-# for k, v in state_dict.items():
-#     if ("norm" in k) and ("mlp" not in k):  # for LayerNorm but not ModLN's mlp
-#         k = k.replace(".weight", ".gamma").replace(".bias", ".beta")
-#     if "adam_" not in k:  # not to load optimizer
-#         state_dict_tmp[k] = v
-# state_dict = state_dict_tmp
 loaded_keys = list(state_dict.keys())
 expexted_keys = list(model_state_dict.keys())
 original_loaded_keys = loaded_keys
@@ -119,6 +110,7 @@ print("Loaded Bagel, time elapsed %.5fs" % (time.time() - start_time))
 model.set_train(False)
 
 print("All models loaded.")
+print("-" * 50)
 
 
 # Step 3: Inferencer Preparing #
@@ -162,7 +154,7 @@ prompt = (
 )
 
 print(prompt)
-print("-" * 10)
+print("-" * 50)
 output_dict = inferencer(text=prompt, **inference_hyper)
 output_dict["image"].save("infer1_img_gen.jpg")
 
@@ -183,7 +175,7 @@ inference_hyper = dict(
 prompt = "a car made of small cars"
 
 print(prompt)
-print("-" * 10)
+print("-" * 50)
 output_dict = inferencer(text=prompt, think=True, **inference_hyper)
 print(output_dict["text"])
 output_dict["image"].save("infer2_img_gen_think.jpg")
@@ -204,7 +196,7 @@ prompt = "She boards a modern subway, quietly reading a folded newspaper, wearin
 
 # display(image)
 print(prompt)
-print("-" * 10)
+print("-" * 50)
 output_dict = inferencer(image=image, text=prompt, **inference_hyper)
 output_dict["image"].save("infer3_img_editing.jpg")
 
@@ -226,7 +218,7 @@ image = Image.open("test_images/octupusy.jpg")
 prompt = "Could you display the sculpture that takes after this design?"
 
 # display(image)
-print("-" * 10)
+print("-" * 50)
 output_dict = inferencer(image=image, text=prompt, think=True, **inference_hyper)
 print(output_dict["text"])
 output_dict["image"].save("infer4_img_editing_think.jpg")
@@ -243,6 +235,6 @@ prompt = "Can someone explain what’s funny about this meme??"
 
 # display(image)
 print(prompt)
-print("-" * 10)
+print("-" * 50)
 output_dict = inferencer(image=image, text=prompt, understanding_output=True, **inference_hyper)
 print(output_dict["text"])

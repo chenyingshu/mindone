@@ -212,17 +212,6 @@ class SiglipFlashAttention2(SiglipAttention):
             query_states = mint.cat([qh, qw], dim=-1)
             key_states = mint.cat([kh, kw], dim=-1)
 
-        # attn_output = flash_attn_varlen_func(
-        #     query_states.to(ms.bfloat16),
-        #     key_states.to(ms.bfloat16),
-        #     value_states.to(ms.bfloat16),
-        #     cu_seqlens_q=cu_seqlens,
-        #     cu_seqlens_k=cu_seqlens,
-        #     max_seqlen_q=max_seqlen,
-        #     max_seqlen_k=max_seqlen,
-        #     causal=False,
-        # )
-        # TODO: double check
         attn_output = ops.flash_attention_score(
             query_states.to(ms.bfloat16),
             key_states.to(ms.bfloat16),
@@ -230,6 +219,7 @@ class SiglipFlashAttention2(SiglipAttention):
             head_num=self.num_heads,
             actual_seq_qlen=cu_seqlens,
             actual_seq_kvlen=cu_seqlens,
+            scalar_value=self.scale,
             input_layout="TND",
         )
 
@@ -257,9 +247,9 @@ class SiglipEncoderLayer(nn.Cell):
         super().__init__()
         self.embed_dim = config.hidden_size
         self.self_attn = SiglipFlashAttention2(config)
-        self.layer_norm1 = mint.nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm1 = mint.nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps).to_float(ms.float32)
         self.mlp = SiglipMLP(config)
-        self.layer_norm2 = mint.nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.layer_norm2 = mint.nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps).to_float(ms.float32)
 
     def construct(
         self,
@@ -286,7 +276,7 @@ class SiglipEncoderLayer(nn.Cell):
         hidden_states = residual + hidden_states
 
         residual = hidden_states
-        hidden_states = self.layer_norm2(hidden_states)
+        hidden_states = self.layer_norm2(hidden_states.float()).to(ms.bfloat16)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
