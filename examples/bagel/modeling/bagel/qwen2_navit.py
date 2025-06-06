@@ -21,15 +21,13 @@ import mindspore as ms
 import mindspore.mint.nn.functional as F
 from mindspore import mint, nn, ops
 
-from mindone.transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2Attention,
-    Qwen2MLP,
-    Qwen2PreTrainedModel,
-)
+from mindone.transformers.models.qwen2.modeling_qwen2 import Qwen2Attention, Qwen2MLP, Qwen2PreTrainedModel
+
 # transformers >= 4.51.0
 from mindone.transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm as Qwen2RMSNorm
 from mindone.transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding as Qwen2RotaryEmbedding
 from mindone.transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
+
 
 class Qwen2Config(_Qwen2Config):
     r"""
@@ -365,8 +363,9 @@ class PackedAttention(Qwen2Attention):
 
         seq_len_q = packed_query_states.shape[0]
         seq_len_k = merged_key_states.shape[0]
-        if self.is_causal and seq_len_q > 1:
-            causal_mask = mint.tril(mint.ones((seq_len_q, seq_len_k), dtype=ms.bool_), diagonal=1)
+        if is_causal and seq_len_q > 1:
+            # ms fa: 0 for retain, 1 for discard
+            causal_mask = mint.triu(mint.ones((seq_len_q, seq_len_k), dtype=ms.bool_), diagonal=1)
         else:
             causal_mask = None
         packed_attn_output = ops.flash_attention_score(
@@ -632,22 +631,11 @@ class PackedAttentionMoT(Qwen2Attention):
         cu_seqlens_q = F.pad(mint.cumsum(query_lens, dim=0), (1, 0))
         cu_seqlens_k = F.pad(mint.cumsum(key_values_lens, dim=0), (1, 0))
 
-        # packed_attn_output = flash_attn_varlen_func(
-        #     q=packed_query_states,
-        #     k=merged_key_states,
-        #     v=merged_value_states,
-        #     cu_seqlens_q=cu_seqlens_q.to(ms.int32),
-        #     cu_seqlens_k=cu_seqlens_k.to(ms.int32),
-        #     max_seqlen_q=max(query_lens).item(),
-        #     max_seqlen_k=max(key_values_lens).item(),
-        #     causal=is_causal,
-        # )
-        # if is_causal:
-
         seq_len_q = packed_query_states.shape[0]
         seq_len_k = merged_key_states.shape[0]
-        if self.is_causal and seq_len_q > 1:
-            causal_mask = mint.tril(mint.ones((seq_len_q, seq_len_k), dtype=ms.bool_), diagonal=1)
+        if is_causal and seq_len_q > 1:
+            # ms fa: 0 for retain, 1 for discard
+            causal_mask = mint.triu(mint.ones((seq_len_q, seq_len_k), dtype=ms.bool_), diagonal=1)
         else:
             causal_mask = None
         packed_attn_output = ops.flash_attention_score(

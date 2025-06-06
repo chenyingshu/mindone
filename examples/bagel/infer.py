@@ -5,8 +5,8 @@ from data.data_utils import add_special_tokens
 from modeling.autoencoder import load_ae
 from modeling.bagel import Bagel, BagelConfig, Qwen2Config, Qwen2ForCausalLM, SiglipVisionConfig, SiglipVisionModel
 from PIL import Image
-
 from transformers import Qwen2Tokenizer
+
 import mindspore as ms
 
 from examples.bagel.data.transforms import ImageTransform
@@ -31,7 +31,7 @@ vit_config.num_hidden_layers = vit_config.num_hidden_layers - 1
 
 # VAE loading
 print("*" * 50)
-print(f"Loading AE ckpt in {model_path}/ae.safetensors.")
+print("Loading AE ckpt in ", os.path.join(model_path, "ae.safetensors"))
 start_time = time.time()
 vae_model, vae_config = load_ae(local_path=os.path.join(model_path, "ae.safetensors"))
 print("Loaded VAE, time elapsed %.5fs" % (time.time() - start_time))
@@ -75,9 +75,9 @@ vit_transform = ImageTransform(980, 224, 14)
 
 # Step 2: Model Loading #
 print("*" * 50)
-print(f"Loading Bagel ckpt in {model_file}.")
 # load pretrained checkpoint
 model_file = os.path.join(model_path, "ema.safetensors")
+print(f"Loading Bagel ckpt in {model_file}.")
 start_time = time.time()
 state_dict = ms.load_checkpoint(model_file, format="safetensors")
 # Check loading keys:
@@ -110,7 +110,6 @@ print("Loaded Bagel, time elapsed %.5fs" % (time.time() - start_time))
 model.set_train(False)
 
 print("All models loaded.")
-print("-" * 50)
 
 
 # Step 3: Inferencer Preparing #
@@ -138,6 +137,7 @@ ms.set_seed(seed)
 
 
 # Inference 1: Image Generation #
+print("*" * 50)
 print("# Inference 1: Image Generation #")
 inference_hyper = dict(
     cfg_text_scale=4.0,
@@ -150,15 +150,19 @@ inference_hyper = dict(
 )
 prompt = (
     "A female cosplayer portraying an ethereal fairy or elf, wearing a flowing dress made of delicate fabrics in soft, "
-    "mystical colors like emerald green and silver. She has pointed ears, a gentle, enchanting expression, and her outfit is adorned with sparkling jewels and intricate patterns. The background is a magical forest with glowing plants, mystical creatures, and a serene atmosphere."
+    "mystical colors like emerald green and silver. She has pointed ears, a gentle, enchanting expression, "
+    "and her outfit is adorned with sparkling jewels and intricate patterns. "
+    "The background is a magical forest with glowing plants, mystical creatures, and a serene atmosphere."
 )
 
 print(prompt)
-print("-" * 50)
+print("-" * 10)
 output_dict = inferencer(text=prompt, **inference_hyper)
 output_dict["image"].save("infer1_img_gen.jpg")
+print("Saved infer1_img_gen.jpg")
 
 # Inference 2: Image Generation with Think #
+print("*" * 50)
 print("# Inference 2: Image Generation with Think #")
 inference_hyper = dict(
     max_think_token_n=1000,
@@ -175,12 +179,14 @@ inference_hyper = dict(
 prompt = "a car made of small cars"
 
 print(prompt)
-print("-" * 50)
+print("-" * 10)
 output_dict = inferencer(text=prompt, think=True, **inference_hyper)
 print(output_dict["text"])
 output_dict["image"].save("infer2_img_gen_think.jpg")
+print("Saved infer2_img_gen_think.jpg")
 
 # Inference 3: Editing #
+print("*" * 50)
 print("# Inference 3: Editing #")
 inference_hyper = dict(
     cfg_text_scale=4.0,
@@ -196,11 +202,13 @@ prompt = "She boards a modern subway, quietly reading a folded newspaper, wearin
 
 # display(image)
 print(prompt)
-print("-" * 50)
+print("-" * 10)
 output_dict = inferencer(image=image, text=prompt, **inference_hyper)
 output_dict["image"].save("infer3_img_editing.jpg")
+print("Saved infer3_img_editing.jpg")
 
 # Inference 4: Edit with Think #
+print("*" * 50)
 print("# Inference 4: Edit with Think #")
 inference_hyper = dict(
     max_think_token_n=1000,
@@ -218,12 +226,14 @@ image = Image.open("test_images/octupusy.jpg")
 prompt = "Could you display the sculpture that takes after this design?"
 
 # display(image)
-print("-" * 50)
+print("-" * 10)
 output_dict = inferencer(image=image, text=prompt, think=True, **inference_hyper)
 print(output_dict["text"])
 output_dict["image"].save("infer4_img_editing_think.jpg")
+print("Saved infer4_img_editing_think.jpg")
 
 # Inference 5: Understanding #
+print("*" * 50)
 print("# Inference 5: Understanding #")
 inference_hyper = dict(
     max_think_token_n=1000,
@@ -235,6 +245,24 @@ prompt = "Can someone explain what’s funny about this meme??"
 
 # display(image)
 print(prompt)
-print("-" * 50)
+print("-" * 10)
+output_dict = inferencer(image=image, text=prompt, understanding_output=True, **inference_hyper)
+print(output_dict["text"])
+
+
+# Inference 6: Pure Text Q&A #
+print("*" * 50)
+print("# Inference 6: Pure Text Q&A #")
+inference_hyper = dict(
+    max_think_token_n=1000,
+    do_sample=False,
+    # text_temperature=0.3,
+)
+image = None
+prompt = "I want to learn Python. What should I do?"
+
+# display(image)
+print(prompt)
+print("-" * 10)
 output_dict = inferencer(image=image, text=prompt, understanding_output=True, **inference_hyper)
 print(output_dict["text"])

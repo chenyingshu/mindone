@@ -12,12 +12,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import sentencepiece as spm
 from transformers.convert_slow_tokenizer import import_protobuf
-
-from mindone.transformers.tokenization_utils import PreTrainedTokenizer
-from mindone.transformers.tokenization_utils_base import AddedToken
+from transformers.tokenization_utils import PreTrainedTokenizer
+from transformers.tokenization_utils_base import AddedToken
 
 if TYPE_CHECKING:
-    from mindone.transformers.tokenization_utils_base import TextInput
+    from transformers.tokenization_utils_base import TextInput
 
 from mindone.transformers.utils import logging, requires_backends
 

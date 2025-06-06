@@ -7,15 +7,11 @@ Image/Text processor class for SigLIP.
 
 from typing import List, Optional, Union
 
+from transformers.tokenization_utils_base import PaddingStrategy, PreTokenizedInput, TextInput, TruncationStrategy
+
 from mindone.transformers.feature_extraction_utils import BatchFeature
 from mindone.transformers.image_utils import ImageInput
 from mindone.transformers.processing_utils import ProcessorMixin
-from mindone.transformers.tokenization_utils_base import (
-    PaddingStrategy,
-    PreTokenizedInput,
-    TextInput,
-    TruncationStrategy,
-)
 from mindone.transformers.utils import TensorType
 
 

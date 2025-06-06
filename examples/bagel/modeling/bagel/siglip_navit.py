@@ -263,7 +263,7 @@ class SiglipEncoderLayer(nn.Cell):
     ) -> ms.Tensor:
         residual = hidden_states
 
-        hidden_states = self.layer_norm1(hidden_states)
+        hidden_states = self.layer_norm1(hidden_states).to(ms.bfloat16)
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             cu_seqlens=cu_seqlens,
