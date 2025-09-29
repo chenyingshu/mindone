@@ -84,7 +84,7 @@ depth.save("depth.jpg")
 
 ## Inference Speed
 
-Experiments are tested on ascend 910* with mindspore 2.6.0 pynative mode.
+Experiments are tested on Ascend Atlas 800T A2 machines with mindspore 2.6.0 pynative mode.
 |      model name	      | use pipeline |   precision   | cards | flash attn | 	s/step	 |
 |:---------------------:|:-----------------:|:--------------:|:---:  |:----------:|:----------:|
 | depth-anything/Depth-Anything-V2-Small-hf |  TRUE    |  fp32 | 1 |     OFF      |    0.062    |

@@ -85,7 +85,7 @@ model = BeitForMaskedImageModeling.from_pretrained("microsoft/dit-base")
 
 ## Inference Speed
 
-Experiments are tested on ascend 910* with mindspore 2.7.0 pynative mode.
+Experiments are tested on Ascend Atlas 800T A2 machines with mindspore 2.7.0 pynative mode.
 |      model name	      | use pipeline |   precision   | cards | flash attn | 	s/step	 |
 |:---------------------:|:-----------------:|:--------------:|:---:  |:----------:|:----------:|
 | microsoft/dit-base-finetuned-rvlcdip |  TRUE    |  fp32 | 1 |     OFF      |    0.306    |
